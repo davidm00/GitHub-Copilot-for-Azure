@@ -1,0 +1,106 @@
+name: foundry-iq-integration-eval
+description: Bounded response-quality checks for non-mutating Foundry IQ workflows.
+
+tags:
+  skill: foundry-iq
+
+defaults:
+  runs: 3
+  timeout: "10m"
+  executor: integration-test-agent-runner
+  model: claude-sonnet-4.6
+
+scoring:
+  threshold: 0.8
+
+stimuli:
+  - name: "Plan a file-backed knowledge base"
+    prompt: |
+      I have Markdown product manuals in this workspace. Explain how you would create
+      a Foundry IQ knowledge base and file knowledge source for them. Do not make Azure
+      changes; identify prerequisites, the creation order, and how you would verify
+      ingestion and retrieval.
+    tags:
+      type: integration
+      tier: full
+      cost: llm
+      area: knowledge-base
+      requiredSkills:
+        - foundry-iq
+    constraints:
+      max_turns: 8
+    rubric:
+      - >-
+        The response gives a Foundry IQ-specific, non-mutating plan that
+        covers prerequisites, knowledge-base and file-source creation order,
+        ingestion readiness or status, and a retrieval verification step.
+    graders:
+      - type: skill-invocation
+        config:
+          required:
+            - foundry-iq
+      - type: completed
+      - type: prompt
+        config:
+          scoring: binary
+          threshold: 1
+
+  - name: "Plan grounded retrieval"
+    prompt: |
+      Show me how to retrieve an answer from an existing Foundry IQ knowledge base
+      and verify that the answer is grounded in the indexed sources. Do not execute
+      anything or change Azure resources.
+    tags:
+      type: integration
+      tier: full
+      cost: llm
+      area: retrieve
+      requiredSkills:
+        - foundry-iq
+    constraints:
+      max_turns: 8
+    rubric:
+      - >-
+        The response explains a Foundry IQ retrieval workflow, identifies the
+        required knowledge-base input, and includes a concrete way to inspect
+        grounding evidence, citations, or source attribution.
+    graders:
+      - type: skill-invocation
+        config:
+          required:
+            - foundry-iq
+      - type: completed
+      - type: prompt
+        config:
+          scoring: binary
+          threshold: 1
+
+  - name: "Diagnose empty retrieval results"
+    prompt: |
+      My Foundry IQ knowledge source reports success, but retrieval returns no useful
+      results. Diagnose this without mutating resources. Give an evidence-first sequence
+      that distinguishes ingestion, indexing, access, and query problems.
+    tags:
+      type: integration
+      tier: full
+      cost: llm
+      area: troubleshooting
+      requiredSkills:
+        - foundry-iq
+    constraints:
+      max_turns: 8
+    rubric:
+      - >-
+        The response presents an ordered diagnostic workflow using observable
+        evidence and separately checks ingestion or source state, indexing or
+        knowledge-base readiness, authorization, and retrieval input.
+    graders:
+      - type: skill-invocation
+        config:
+          required:
+            - foundry-iq
+      - type: completed
+      - type: prompt
+        config:
+          scoring: binary
+          threshold: 1
