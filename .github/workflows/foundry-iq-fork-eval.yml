@@ -2,6 +2,32 @@ name: Foundry IQ fork routing eval
 
 on:
   workflow_dispatch:
+    inputs:
+      plugin:
+        description: Plugin directory under plugins/
+        required: true
+        type: string
+        default: foundry-iq-skills
+      skill:
+        description: Skill directory within the plugin
+        required: true
+        type: string
+        default: foundry-iq
+      suite:
+        description: Single YAML filename within evals/<plugin>/<skill>/
+        required: true
+        type: string
+        default: eval.yaml
+      model:
+        description: Copilot model ID
+        required: true
+        type: string
+        default: claude-sonnet-5
+      expected-case-count:
+        description: Expected number of cases (all must finish and pass)
+        required: true
+        type: string
+        default: "7"
 
 permissions:
   contents: read
@@ -12,7 +38,7 @@ concurrency:
 
 jobs:
   routing:
-    if: github.repository == 'davidm00/GitHub-Copilot-for-Azure' && github.ref == 'refs/heads/publish/foundry-iq-demo'
+    if: github.repository == 'davidm00/GitHub-Copilot-for-Azure'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     defaults:
@@ -22,6 +48,11 @@ jobs:
       VALLY_RUNNER_DISABLE_AZURE_MCP: "true"
       DEBUG: ""
       TEST_RUN_ID: foundry-iq-fork
+      PLUGIN: ${{ inputs.plugin }}
+      SKILL: ${{ inputs.skill }}
+      SUITE: ${{ inputs.suite }}
+      MODEL: ${{ inputs.model }}
+      EXPECTED_CASE_COUNT: ${{ inputs.expected-case-count }}
 
     steps:
       - name: Checkout approved branch
@@ -29,6 +60,22 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+
+      - name: Validate selected target
+        run: |
+          if [[ ! "$PLUGIN" =~ ^[a-z0-9]+(-[a-z0-9]+)*$ ||
+                ! "$SKILL" =~ ^[a-z0-9]+(-[a-z0-9]+)*$ ||
+                ! "$SUITE" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]*\.ya?ml$ ||
+                ! "$MODEL" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]*$ ||
+                ! "$EXPECTED_CASE_COUNT" =~ ^[1-9][0-9]*$ ]]; then
+            echo "::error::Use plugin/skill directory names, one YAML filename, a model ID, and a positive integer case count."
+            exit 1
+          fi
+          if [[ ! -f "plugins/$PLUGIN/skills/$SKILL/SKILL.md" ||
+                ! -f "evals/$PLUGIN/$SKILL/$SUITE" ]]; then
+            echo "::error::Selected skill or suite is absent on this branch."
+            exit 1
+          fi
 
       - name: Require separately configured Copilot credential
         env:
@@ -51,13 +98,13 @@ jobs:
           npm ci --prefix tests
           npm run build
 
-      - name: Validate exact approved suite
+      - name: Validate selected suite
         run: |
-          echo 'decd36e440d154306cadabc6d5ac1396913892dc1cf291cfdbe4cea08828da5a  evals/foundry-iq-skills/foundry-iq/eval.yaml' | sha256sum --check
+          sha256sum "evals/$PLUGIN/$SKILL/$SUITE"
           npm --prefix scripts run vally validate-stimulus
           node tests/node_modules/@microsoft/vally-cli/dist/index.js lint \
-            "$GITHUB_WORKSPACE/output/foundry-iq-skills/skills" \
-            --eval-spec "$GITHUB_WORKSPACE/evals/foundry-iq-skills/foundry-iq/eval.yaml" \
+            "$GITHUB_WORKSPACE/output/$PLUGIN/skills/$SKILL" \
+            --eval-spec "$GITHUB_WORKSPACE/evals/$PLUGIN/$SKILL/$SUITE" \
             --grader-plugin "$GITHUB_WORKSPACE/tests/vally/vally-graders.ts" --strict
 
       - name: Setup Copilot CLI without exporting credentials
@@ -90,17 +137,17 @@ jobs:
             const auth = await client.getAuthStatus();
             if (!auth.isAuthenticated) throw new Error("Copilot authentication failed");
             const models = await client.listModels();
-            const model = models.find(m => m.id === "claude-sonnet-5");
+            const model = models.find(m => m.id === process.env.MODEL);
             if (!model || model.policy?.state === "disabled") {
-              throw new Error("claude-sonnet-5 is unavailable or disabled");
+              throw new Error(`${process.env.MODEL} is unavailable or disabled`);
             }
-            console.log("Copilot authenticated; claude-sonnet-5 is listed.");
+            console.log(`Copilot authenticated; ${process.env.MODEL} is listed.`);
           } finally {
             await client.stop();
           }
           NODE
 
-      - name: Run seven cases once
+      - name: Run selected cases once
         working-directory: tests
         env:
           COPILOT_GITHUB_TOKEN: ${{ secrets.COPILOT_EVAL_TOKEN }}
@@ -111,10 +158,10 @@ jobs:
           date -u +'%Y-%m-%dT%H:%M:%SZ' > results/native-start.txt
           set +e
           node node_modules/@microsoft/vally-cli/dist/index.js eval \
-            --eval-spec "$GITHUB_WORKSPACE/evals/foundry-iq-skills/foundry-iq/eval.yaml" \
+            --eval-spec "$GITHUB_WORKSPACE/evals/$PLUGIN/$SKILL/$SUITE" \
             --executor-plugin "$GITHUB_WORKSPACE/tests/vally/vally-executor.ts" \
             --grader-plugin "$GITHUB_WORKSPACE/tests/vally/vally-graders.ts" \
-            --model claude-sonnet-5 --runs 1 --workers 1 --max-retries 0 \
+            --model "$MODEL" --runs 1 --workers 1 --max-retries 0 \
             --timeout 2m --require-pass --output-dir "$GITHUB_WORKSPACE/tests/results" \
             --verbose > results/native-stdout.log 2> results/native-stderr.log
           status=$?
@@ -122,7 +169,7 @@ jobs:
           printf '%s\n' "$status" > results/native-exit.txt
           exit "$status"
 
-      - name: Require seven individually passing usable trajectories
+      - name: Require all expected cases to have passing usable trajectories
         working-directory: tests
         run: |
           node --input-type=module <<'NODE'
@@ -136,11 +183,14 @@ jobs:
           for (const r of trials) {
             console.log(`${r.gradeResult?.stimulusName ?? "unknown"}: ${r.status}, passed=${r.gradeResult?.passed}`);
           }
-          if (trials.length !== 7 || trials.some(r =>
+          const expectedCount = Number(process.env.EXPECTED_CASE_COUNT);
+          if (!Number.isSafeInteger(expectedCount) || expectedCount < 1 ||
+            trials.length !== expectedCount || trials.some(r =>
             r.status !== "success" || !r.trajectory || !r.gradeResult?.passed ||
-            r.model !== "claude-sonnet-5" || !r.trajectory.events?.length ||
-            (r.gradeResult.stimulusName.startsWith("Negative:") && !r.trajectory.output?.trim()))) {
-            throw new Error("Expected seven individually passing usable trajectories; aggregate PASS is insufficient");
+            r.model !== process.env.MODEL || !r.trajectory.events?.length ||
+            (r.gradeResult.details?.some(g => g.graderType === "skill-invocation" &&
+              g.metadata?.disallowed?.length) && !r.trajectory.output?.trim()))) {
+            throw new Error(`Expected ${expectedCount} individually passing usable trajectories; aggregate PASS is insufficient`);
           }
           NODE
 
