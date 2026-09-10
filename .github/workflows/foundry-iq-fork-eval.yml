@@ -13,21 +13,11 @@ on:
         required: true
         type: string
         default: foundry-iq
-      suite:
-        description: Single YAML filename within evals/<plugin>/<skill>/
-        required: true
-        type: string
-        default: eval.yaml
       model:
         description: Copilot model ID
         required: true
         type: string
         default: claude-sonnet-5
-      expected-case-count:
-        description: Expected number of cases (all must finish and pass)
-        required: true
-        type: string
-        default: "7"
 
 permissions:
   contents: read
@@ -50,9 +40,7 @@ jobs:
       TEST_RUN_ID: foundry-iq-fork
       PLUGIN: ${{ inputs.plugin }}
       SKILL: ${{ inputs.skill }}
-      SUITE: ${{ inputs.suite }}
       MODEL: ${{ inputs.model }}
-      EXPECTED_CASE_COUNT: ${{ inputs.expected-case-count }}
 
     steps:
       - name: Checkout approved branch
@@ -65,15 +53,13 @@ jobs:
         run: |
           if [[ ! "$PLUGIN" =~ ^[a-z0-9]+(-[a-z0-9]+)*$ ||
                 ! "$SKILL" =~ ^[a-z0-9]+(-[a-z0-9]+)*$ ||
-                ! "$SUITE" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]*\.ya?ml$ ||
-                ! "$MODEL" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]*$ ||
-                ! "$EXPECTED_CASE_COUNT" =~ ^[1-9][0-9]*$ ]]; then
-            echo "::error::Use plugin/skill directory names, one YAML filename, a model ID, and a positive integer case count."
+                ! "$MODEL" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]*$ ]]; then
+            echo "::error::Use plugin/skill directory names and a model ID."
             exit 1
           fi
           if [[ ! -f "plugins/$PLUGIN/skills/$SKILL/SKILL.md" ||
-                ! -f "evals/$PLUGIN/$SKILL/$SUITE" ]]; then
-            echo "::error::Selected skill or suite is absent on this branch."
+                ! -d "evals/$PLUGIN/$SKILL" ]]; then
+            echo "::error::Selected skill or eval directory is absent on this branch."
             exit 1
           fi
 
@@ -98,14 +84,45 @@ jobs:
           npm ci --prefix tests
           npm run build
 
-      - name: Validate selected suite
+      - name: Validate selected skill suites
         run: |
-          sha256sum "evals/$PLUGIN/$SKILL/$SUITE"
           npm --prefix scripts run vally validate-stimulus
-          node tests/node_modules/@microsoft/vally-cli/dist/index.js lint \
-            "$GITHUB_WORKSPACE/output/$PLUGIN/skills/$SKILL" \
-            --eval-spec "$GITHUB_WORKSPACE/evals/$PLUGIN/$SKILL/$SUITE" \
-            --grader-plugin "$GITHUB_WORKSPACE/tests/vally/vally-graders.ts" --strict
+          for suite in "$GITHUB_WORKSPACE/evals/$PLUGIN/$SKILL/"*.yaml; do
+            sha256sum "$suite"
+            node tests/node_modules/@microsoft/vally-cli/dist/index.js lint \
+              "$GITHUB_WORKSPACE/output/$PLUGIN/skills/$SKILL" \
+              --eval-spec "$suite" \
+              --grader-plugin "$GITHUB_WORKSPACE/tests/vally/vally-graders.ts" --strict
+          done
+
+      - name: Derive expected cases with the native Vally loader
+        working-directory: tests
+        run: |
+          node --input-type=module <<'NODE'
+          import fs from "node:fs";
+          import path from "node:path";
+          import { ProjectContext, loadEvalWithParams } from "@microsoft/vally";
+          const evalDir = path.resolve(process.env.GITHUB_WORKSPACE, "evals",
+            process.env.PLUGIN, process.env.SKILL);
+          // Match run-vally-test.ts: top-level .yaml files only, never fixture directories.
+          const files = fs.readdirSync(evalDir).filter(file => file.endsWith(".yaml")).sort();
+          if (!files.length) throw new Error("No top-level YAML suites found for the selected skill");
+          const context = await ProjectContext.load(evalDir);
+          const cases = [];
+          for (const file of files) {
+            const evalPath = path.join(evalDir, file);
+            const { spec } = await loadEvalWithParams(evalPath, { suiteParams: context.config.params });
+            const names = spec.stimuli.map(s => s.name);
+            if (!names.length || names.some(n => typeof n !== "string" || !n.trim()) ||
+              new Set(names).size !== names.length) {
+              throw new Error(`${file} must contain uniquely named cases`);
+            }
+            cases.push(...names.map(name => ({ evalName: spec.name, evalPath, name })));
+          }
+          fs.mkdirSync("results", { recursive: true });
+          fs.writeFileSync("results/expected-cases.json", JSON.stringify(cases, null, 2));
+          console.log(`Expecting all ${cases.length} cases across ${files.length} suites exactly once.`);
+          NODE
 
       - name: Setup Copilot CLI without exporting credentials
         id: copilot
@@ -157,12 +174,9 @@ jobs:
           mkdir -p results
           date -u +'%Y-%m-%dT%H:%M:%SZ' > results/native-start.txt
           set +e
-          node node_modules/@microsoft/vally-cli/dist/index.js eval \
-            --eval-spec "$GITHUB_WORKSPACE/evals/$PLUGIN/$SKILL/$SUITE" \
-            --executor-plugin "$GITHUB_WORKSPACE/tests/vally/vally-executor.ts" \
-            --grader-plugin "$GITHUB_WORKSPACE/tests/vally/vally-graders.ts" \
+          npm run test:vally -- --plugin "$PLUGIN" --skill "$SKILL" \
             --model "$MODEL" --runs 1 --workers 1 --max-retries 0 \
-            --timeout 2m --require-pass --output-dir "$GITHUB_WORKSPACE/tests/results" \
+            --timeout 2m --require-pass \
             --verbose > results/native-stdout.log 2> results/native-stderr.log
           status=$?
           date -u +'%Y-%m-%dT%H:%M:%SZ' > results/native-end.txt
@@ -175,6 +189,9 @@ jobs:
           node --input-type=module <<'NODE'
           import fs from "node:fs";
           import path from "node:path";
+          const expected = JSON.parse(fs.readFileSync("results/expected-cases.json", "utf8"));
+          const caseKey = (evalPath, evalName, name) => JSON.stringify([path.resolve(evalPath), evalName, name]);
+          const expectedKeys = new Set(expected.map(c => caseKey(c.evalPath, c.evalName, c.name)));
           const files = fs.readdirSync("results", { recursive: true })
             .filter(p => path.basename(p) === "results.jsonl");
           const trials = files.flatMap(p => fs.readFileSync(path.join("results", p), "utf8")
@@ -183,14 +200,15 @@ jobs:
           for (const r of trials) {
             console.log(`${r.gradeResult?.stimulusName ?? "unknown"}: ${r.status}, passed=${r.gradeResult?.passed}`);
           }
-          const expectedCount = Number(process.env.EXPECTED_CASE_COUNT);
-          if (!Number.isSafeInteger(expectedCount) || expectedCount < 1 ||
-            trials.length !== expectedCount || trials.some(r =>
+          const actualKeys = new Set(trials.map(r => caseKey(r.evalFilePath, r.evalName, r.stimulus)));
+          if (!expectedKeys.size || trials.length !== expectedKeys.size ||
+            actualKeys.size !== expectedKeys.size || trials.some(r =>
+            !expectedKeys.has(caseKey(r.evalFilePath, r.evalName, r.stimulus)) ||
             r.status !== "success" || !r.trajectory || !r.gradeResult?.passed ||
             r.model !== process.env.MODEL || !r.trajectory.events?.length ||
             (r.gradeResult.details?.some(g => g.graderType === "skill-invocation" &&
               g.metadata?.disallowed?.length) && !r.trajectory.output?.trim()))) {
-            throw new Error(`Expected ${expectedCount} individually passing usable trajectories; aggregate PASS is insufficient`);
+            throw new Error(`Expected all ${expectedKeys.size} unique selected cases to have passing usable trajectories; aggregate PASS is insufficient`);
           }
           NODE
 
