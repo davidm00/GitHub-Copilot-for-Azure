@@ -1,0 +1,156 @@
+name: Foundry IQ fork routing eval
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: foundry-iq-fork-eval
+  cancel-in-progress: false
+
+jobs:
+  routing:
+    if: github.repository == 'davidm00/GitHub-Copilot-for-Azure' && github.ref == 'refs/heads/publish/foundry-iq-demo'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: bash
+    env:
+      VALLY_RUNNER_DISABLE_AZURE_MCP: "true"
+      DEBUG: ""
+      TEST_RUN_ID: foundry-iq-fork
+
+    steps:
+      - name: Checkout approved branch
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Require separately configured Copilot credential
+        env:
+          COPILOT_GITHUB_TOKEN: ${{ secrets.COPILOT_EVAL_TOKEN }}
+        run: |
+          if [ -z "$COPILOT_GITHUB_TOKEN" ]; then
+            echo "::error::Configure COPILOT_EVAL_TOKEN with a personal fine-grained PAT granting Copilot Requests."
+            exit 1
+          fi
+
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22"
+
+      - name: Install dependencies and build
+        run: |
+          npm ci --ignore-scripts
+          npm ci --prefix scripts --ignore-scripts
+          npm ci --prefix tests
+          npm run build
+
+      - name: Validate exact approved suite
+        run: |
+          echo 'decd36e440d154306cadabc6d5ac1396913892dc1cf291cfdbe4cea08828da5a  evals/foundry-iq-skills/foundry-iq/eval.yaml' | sha256sum --check
+          npm --prefix scripts run vally validate-stimulus
+          node tests/node_modules/@microsoft/vally-cli/dist/index.js lint \
+            "$GITHUB_WORKSPACE/output/foundry-iq-skills/skills" \
+            --eval-spec "$GITHUB_WORKSPACE/evals/foundry-iq-skills/foundry-iq/eval.yaml" \
+            --grader-plugin "$GITHUB_WORKSPACE/tests/vally/vally-graders.ts" --strict
+
+      - name: Setup Copilot CLI without exporting credentials
+        id: copilot
+        uses: mvkaran/setup-copilot-cli@d05a47209e6b3185c9c55702bef49f28e6eebef7 # v1
+
+      - name: Record runtime versions
+        working-directory: tests
+        run: |
+          mkdir -p results
+          {
+            node --version
+            npm --version
+            copilot --version
+            npm ls @microsoft/vally-cli @github/copilot-sdk --depth=0
+            git rev-parse HEAD
+          } > results/versions.txt
+
+      - name: Check Copilot authentication and model availability without generation
+        working-directory: tests
+        env:
+          COPILOT_GITHUB_TOKEN: ${{ secrets.COPILOT_EVAL_TOKEN }}
+          COPILOT_CLI_PATH: ${{ steps.copilot.outputs.path }}
+        run: |
+          node --input-type=module <<'NODE'
+          import { CopilotClient, RuntimeConnection } from "@github/copilot-sdk";
+          const client = new CopilotClient({ connection: RuntimeConnection.forStdio(), logLevel: "error" });
+          try {
+            await client.start();
+            const auth = await client.getAuthStatus();
+            if (!auth.isAuthenticated) throw new Error("Copilot authentication failed");
+            const models = await client.listModels();
+            const model = models.find(m => m.id === "claude-sonnet-5");
+            if (!model || model.policy?.state === "disabled") {
+              throw new Error("claude-sonnet-5 is unavailable or disabled");
+            }
+            console.log("Copilot authenticated; claude-sonnet-5 is listed.");
+          } finally {
+            await client.stop();
+          }
+          NODE
+
+      - name: Run seven cases once
+        working-directory: tests
+        env:
+          COPILOT_GITHUB_TOKEN: ${{ secrets.COPILOT_EVAL_TOKEN }}
+          COPILOT_CLI_PATH: ${{ steps.copilot.outputs.path }}
+        run: |
+          unset MODEL_OVERRIDE NO_SKILLS GH_TOKEN GITHUB_TOKEN
+          mkdir -p results
+          date -u +'%Y-%m-%dT%H:%M:%SZ' > results/native-start.txt
+          set +e
+          node node_modules/@microsoft/vally-cli/dist/index.js eval \
+            --eval-spec "$GITHUB_WORKSPACE/evals/foundry-iq-skills/foundry-iq/eval.yaml" \
+            --executor-plugin "$GITHUB_WORKSPACE/tests/vally/vally-executor.ts" \
+            --grader-plugin "$GITHUB_WORKSPACE/tests/vally/vally-graders.ts" \
+            --model claude-sonnet-5 --runs 1 --workers 1 --max-retries 0 \
+            --timeout 2m --require-pass --output-dir "$GITHUB_WORKSPACE/tests/results" \
+            --verbose > results/native-stdout.log 2> results/native-stderr.log
+          status=$?
+          date -u +'%Y-%m-%dT%H:%M:%SZ' > results/native-end.txt
+          printf '%s\n' "$status" > results/native-exit.txt
+          exit "$status"
+
+      - name: Require seven individually passing usable trajectories
+        working-directory: tests
+        run: |
+          node --input-type=module <<'NODE'
+          import fs from "node:fs";
+          import path from "node:path";
+          const files = fs.readdirSync("results", { recursive: true })
+            .filter(p => path.basename(p) === "results.jsonl");
+          const trials = files.flatMap(p => fs.readFileSync(path.join("results", p), "utf8")
+            .trim().split("\n").filter(Boolean).map(line => JSON.parse(line)))
+            .filter(r => r.type === "trial-result");
+          for (const r of trials) {
+            console.log(`${r.gradeResult?.stimulusName ?? "unknown"}: ${r.status}, passed=${r.gradeResult?.passed}`);
+          }
+          if (trials.length !== 7 || trials.some(r =>
+            r.status !== "success" || !r.trajectory || !r.gradeResult?.passed ||
+            r.model !== "claude-sonnet-5" || !r.trajectory.events?.length ||
+            (r.gradeResult.stimulusName.startsWith("Negative:") && !r.trajectory.output?.trim()))) {
+            throw new Error("Expected seven individually passing usable trajectories; aggregate PASS is insufficient");
+          }
+          NODE
+
+      - name: Upload raw evidence even on failure
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: foundry-iq-routing-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 7
+          if-no-files-found: warn
+          path: |
+            tests/results/
+            tests/reports/test-run-foundry-iq-fork/

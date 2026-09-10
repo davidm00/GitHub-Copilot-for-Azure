@@ -1,0 +1,144 @@
+name: foundry-iq-integration-eval
+description: |
+  Integration evaluation for the foundry-iq skill.
+  Tests routing for Azure AI Search and Foundry IQ build, grounding,
+  troubleshooting, and production-hardening prompts, plus explicit non-goals.
+
+tags:
+  type: integration
+  skill: foundry-iq
+
+defaults:
+  runs: 5
+  timeout: "10m"
+  executor: integration-test-agent-runner
+  model: claude-sonnet-4.6
+
+scoring:
+  threshold: 0.8
+
+stimuli:
+  - name: "Add product search backed by Blob"
+    prompt: "Our product catalog is in an Azure Blob container. Add search to our .NET API with facets and autocomplete, and set up the Azure AI Search resources and ingestion it needs."
+    tags:
+      type: integration
+      tier: smoke
+      cost: llm
+      area: routing
+      requiredSkills:
+        - foundry-iq
+      earlyTerminate: '[{"type":"skill-call","skill":"foundry-iq"},{"type":"tool-call-count","count":3}]'
+    graders:
+      - type: skill-invocation
+        config:
+          required:
+            - foundry-iq
+      - type: output-not-matches
+        config:
+          pattern: "(?i)fatal error|unhandled exception|stack trace"
+
+  - name: "Ground an existing agent in permission-trimmed SharePoint"
+    prompt: "Ground the Foundry Prompt Agent we already created in our SharePoint policy library, but make sure each employee can retrieve only the documents they are entitled to see."
+    tags:
+      type: integration
+      tier: full
+      cost: llm
+      area: routing
+      requiredSkills:
+        - foundry-iq
+      earlyTerminate: '[{"type":"skill-call","skill":"foundry-iq"},{"type":"tool-call-count","count":3}]'
+    graders:
+      - type: skill-invocation
+        config:
+          required:
+            - foundry-iq
+      - type: output-not-matches
+        config:
+          pattern: "(?i)fatal error|unhandled exception|stack trace"
+
+  - name: "Diagnose stale search results"
+    prompt: "Our Azure AI Search indexer reports success, but newly uploaded documents are missing and users keep getting stale results. Diagnose the problem and repair it safely."
+    tags:
+      type: integration
+      tier: full
+      cost: llm
+      area: routing
+      requiredSkills:
+        - foundry-iq
+      earlyTerminate: '[{"type":"skill-call","skill":"foundry-iq"},{"type":"tool-call-count","count":3}]'
+    graders:
+      - type: skill-invocation
+        config:
+          required:
+            - foundry-iq
+      - type: output-not-matches
+        config:
+          pattern: "(?i)fatal error|unhandled exception|stack trace"
+
+  - name: "Harden a Foundry IQ prototype for production"
+    prompt: "Move our Foundry IQ knowledge-base prototype into production with managed identity, private endpoints, and no public network access."
+    tags:
+      type: integration
+      tier: full
+      cost: llm
+      area: routing
+      requiredSkills:
+        - foundry-iq
+      earlyTerminate: '[{"type":"skill-call","skill":"foundry-iq"},{"type":"tool-call-count","count":3}]'
+    graders:
+      - type: skill-invocation
+        config:
+          required:
+            - foundry-iq
+      - type: output-not-matches
+        config:
+          pattern: "(?i)fatal error|unhandled exception|stack trace"
+
+  - name: "Improve retrieval quality"
+    prompt: "Use our evaluation dataset to measure why answers have irrelevant passages and inconsistent citations, then tune retrieval quality."
+    tags:
+      type: integration
+      tier: full
+      cost: llm
+      area: routing
+      requiredSkills:
+        - foundry-iq
+      earlyTerminate: '[{"type":"skill-call","skill":"foundry-iq"},{"type":"tool-call-count","count":3}]'
+    graders:
+      - type: skill-invocation
+        config:
+          required:
+            - foundry-iq
+      - type: output-not-matches
+        config:
+          pattern: "(?i)fatal error|unhandled exception|stack trace"
+
+  - name: "Negative: summarize one repository document"
+    prompt: "Summarize docs/architecture.md and list its three main recommendations."
+    tags:
+      type: integration
+      tier: full
+      cost: llm
+      area: negative-routing
+      requiredSkills:
+        - foundry-iq
+    graders:
+      - type: skill-invocation
+        config:
+          disallowed:
+            - foundry-iq
+
+  - name: "Negative: rename a TypeScript symbol"
+    prompt: "Rename the TypeScript interface SearchOptions to QueryOptions and update all references."
+    tags:
+      type: integration
+      tier: full
+      cost: llm
+      area: negative-routing
+      requiredSkills:
+        - foundry-iq
+    graders:
+      - type: skill-invocation
+        config:
+          disallowed:
+            - foundry-iq
