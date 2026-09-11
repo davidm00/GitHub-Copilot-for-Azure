@@ -1,0 +1,437 @@
+# Freshly authored from skills/foundry-iq/SKILL.md and its linked procedures.
+# No cases or fixtures were copied from upstream or internal benchmarks.
+# Upstream reference: microsoft/GitHub-Copilot-for-Azure
+# Inspected commit: 79958513d04ffc6b04a557d3644be305a9349f57
+# Guidance: .github/skills/vally-eval/SKILL.md, references/ci-test.md,
+# tests/AGENTS.md, tests/vally/tag-helpers.ts, tests/utils/skill-loader.ts,
+# tests/run-vally-test.ts, scripts/src/vally/validate-stimulus.ts, and the
+# three evals/azure-kusto-graph-skills/*/eval.yaml invocation examples.
+# Graders: https://microsoft.github.io/vally/reference/graders/
+#
+# Scope: skill selection only, not workflow selection, completed Azure tasks,
+# retrieval quality, ACL correctness, safe mutation, or all-plugin competition.
+# Every case keeps foundry-iq available. requiredSkills infers the target plugin;
+# it does not assert invocation or introduce an unrelated comparison skill.
+#
+# All scenario facts and inline snippets below are synthetic author-created
+# context. No external data, real resource IDs, credentials, or fixtures needed.
+# Positive cases ask for planning/diagnostic guidance from supplied facts.
+# REVIEW ASSUMPTION: the intent is sufficient to load the skill before asking
+# questions or examining resources/files. A missed call may reflect discovery
+# behavior rather than a broken skill. The four-tool bound is diagnostic only:
+# upstream stops when the count EXCEEDS four; it is not an isolation boundary.
+#
+# Runtime review must reject errors, absent trajectories and empty negatives.
+# output-not-matches alone does not establish session health. Early-terminated
+# positives may have empty final output; completed is deliberately not used.
+# Proposed initial budget, subject to separate approval: one trial per case,
+# serial execution, no retries, two minutes per case (32 minutes maximum
+# nominal trial time plus overhead). Model is a proposal, not a requirement.
+name: foundry-iq-routing-eval
+description: |
+  Fresh routing checks for application search, grounded knowledge, source and
+  identity composition, retrieval diagnosis, production hardening and quality
+  measurement, with ordinary file/code and unrelated-service exclusions.
+tags:
+  type: integration
+  skill: foundry-iq
+defaults:
+  runs: 1
+  timeout: "2m"
+  executor: integration-test-agent-runner
+  model: claude-sonnet-4.6
+scoring:
+  threshold: 1.0
+stimuli:
+  # Required: explicit knowledge-base provisioning is a declared WHEN signal.
+  # Cross-document synthesis supplies the knowledge-base query-shape rationale.
+  # No corpus fixture: this asks for a plan, not upload, ingestion or an answer.
+  - name: provision-knowledge-base
+    prompt: |
+      Help me plan a Foundry IQ knowledge base for our engineering manuals.
+      Questions need to combine evidence from separate manuals, and the team
+      will reuse it across sessions. Start with reuse checks and a proposed
+      setup; do not create resources or upload documents yet.
+    tags:
+      type: integration
+      tier: smoke
+      cost: llm
+      area: routing
+      requiredSkills:
+        - foundry-iq
+      earlyTerminate: '[{"type":"skill-call","skill":"foundry-iq"},{"type":"tool-call-count","count":4}]'
+    graders:
+      - type: skill-invocation
+        config:
+          required:
+            - foundry-iq
+      - type: output-not-matches
+        config:
+          pattern: "(?i)fatal error|unhandled exception|stack trace"
+
+  # Required: classic-application-search includes storefront facets/autocomplete.
+  # Inline schema and design-only request remove any dependency on app files.
+  - name: design-storefront-search
+    prompt: |
+      Design Azure AI Search for a storefront with 80,000 products. Each product
+      has id, title, description, category and price. We need category facets,
+      price filters and autocomplete in our .NET API, not a chat assistant.
+      Propose the index and query approach before we implement anything.
+    tags:
+      type: integration
+      tier: full
+      cost: llm
+      area: routing
+      requiredSkills:
+        - foundry-iq
+      earlyTerminate: '[{"type":"skill-call","skill":"foundry-iq"},{"type":"tool-call-count","count":4}]'
+    graders:
+      - type: skill-invocation
+        config:
+          required:
+            - foundry-iq
+      - type: output-not-matches
+        config:
+          pattern: "(?i)fatal error|unhandled exception|stack trace"
+
+  # Required: explicit multi-file onboarding and durable reuse, not a small-folder
+  # single-use question. discover-and-decide and onboard-local support activation.
+  # No fixture: the user explicitly says the folder has not been supplied yet.
+  - name: plan-durable-local-corpus
+    prompt: |
+      I have a local folder of 6,000 maintenance guides that changes weekly.
+      I want to onboard it so our team can ask questions with source citations
+      across sessions. I have not copied the folder into this workspace yet.
+      Outline the ingestion and retrieval plan and what you need from me next.
+    tags:
+      type: integration
+      tier: full
+      cost: llm
+      area: routing
+      requiredSkills:
+        - foundry-iq
+      earlyTerminate: '[{"type":"skill-call","skill":"foundry-iq"},{"type":"tool-call-count","count":4}]'
+    graders:
+      - type: skill-invocation
+        config:
+          required:
+            - foundry-iq
+      - type: output-not-matches
+        config:
+          pattern: "(?i)fatal error|unhandled exception|stack trace"
+
+  # Required: existing Prompt Agent plus Blob source composes ground-prompt-agent
+  # with connect-blob. Bounded lookup does not itself require a knowledge base.
+  # No fixture/env: setup is not authorized; this is NOT the approved script
+  # fast path whose scoped environment and acceptance question would be required.
+  - name: ground-existing-agent-from-blob
+    prompt: |
+      The Foundry Prompt Agent we already created should answer warranty-period
+      questions from one Azure Blob container of product manuals, with citations
+      to the original files. Keep its existing model and instructions. Explain
+      the smallest retrieval integration first; no setup is authorized yet.
+    tags:
+      type: integration
+      tier: smoke
+      cost: llm
+      area: routing
+      requiredSkills:
+        - foundry-iq
+      earlyTerminate: '[{"type":"skill-call","skill":"foundry-iq"},{"type":"tool-call-count","count":4}]'
+    graders:
+      - type: skill-invocation
+        config:
+          required:
+            - foundry-iq
+      - type: output-not-matches
+        config:
+          pattern: "(?i)fatal error|unhandled exception|stack trace"
+
+  # Required: SharePoint grounding plus per-user entitlement is in scope.
+  # This tests target activation, not whether the two primitives are composed.
+  # No fixture: library/license/identity discovery belongs to the proposed plan.
+  - name: sharepoint-with-user-permissions
+    prompt: |
+      Our employee assistant needs to answer from a SharePoint document library.
+      Each user must only see answers and citations from documents they can
+      already access. Help me design the retrieval and identity flow before
+      connecting the library.
+    tags:
+      type: integration
+      tier: full
+      cost: llm
+      area: routing
+      requiredSkills:
+        - foundry-iq
+      earlyTerminate: '[{"type":"skill-call","skill":"foundry-iq"},{"type":"tool-call-count","count":4}]'
+    graders:
+      - type: skill-invocation
+        config:
+          required:
+            - foundry-iq
+      - type: output-not-matches
+        config:
+          pattern: "(?i)fatal error|unhandled exception|stack trace"
+
+  # Required: combining private documents with public web is multi-source-knowledge.
+  # No URLs/data fixture or public-data permission needed: nothing is fetched.
+  - name: combine-private-and-public-knowledge
+    prompt: |
+      Plan a support assistant that combines our private service manuals with
+      product information from our public website. Some questions need evidence
+      from both sources and citations showing which source supports each claim.
+      I only want an architecture proposal, not a crawl or a deployment.
+    tags:
+      type: integration
+      tier: full
+      cost: llm
+      area: routing
+      requiredSkills:
+        - foundry-iq
+      earlyTerminate: '[{"type":"skill-call","skill":"foundry-iq"},{"type":"tool-call-count","count":4}]'
+    graders:
+      - type: skill-invocation
+        config:
+          required:
+            - foundry-iq
+      - type: output-not-matches
+        config:
+          pattern: "(?i)fatal error|unhandled exception|stack trace"
+
+  # Required: hosted-agent governed federation and caller ACLs are explicit
+  # enterprise-isolated signals, not generic model deployment.
+  # No live source fixture: asks to reason about the stated requirements.
+  - name: governed-hosted-agent
+    prompt: |
+      We need a hosted agent that federates Fabric IQ and Work IQ knowledge while
+      preserving caller-specific document ACLs. Outline the governed retrieval
+      design and the identity checks required before implementation.
+    tags:
+      type: integration
+      tier: full
+      cost: llm
+      area: routing
+      requiredSkills:
+        - foundry-iq
+      earlyTerminate: '[{"type":"skill-call","skill":"foundry-iq"},{"type":"tool-call-count","count":4}]'
+    graders:
+      - type: skill-invocation
+        config:
+          required:
+            - foundry-iq
+      - type: output-not-matches
+        config:
+          pattern: "(?i)fatal error|unhandled exception|stack trace"
+
+  # Required: source-unstated agent grounding invokes inventory/reuse assessment.
+  # Missing source location is intentional; activation-before-clarification is
+  # a review assumption, not permission to fabricate resources or content.
+  - name: ground-assistant-source-unknown
+    prompt: |
+      Help ground our internal assistant in our HR policies so employees get
+      answers backed by citations. I do not know where the authoritative policy
+      collection lives or whether another team already made it searchable.
+      Where should we start?
+    tags:
+      type: integration
+      tier: full
+      cost: llm
+      area: routing
+      requiredSkills:
+        - foundry-iq
+      earlyTerminate: '[{"type":"skill-call","skill":"foundry-iq"},{"type":"tool-call-count","count":4}]'
+    graders:
+      - type: skill-invocation
+        config:
+          required:
+            - foundry-iq
+      - type: output-not-matches
+        config:
+          pattern: "(?i)fatal error|unhandled exception|stack trace"
+
+  # Required: 403 on an existing Search query is diagnose-and-repair, not provision.
+  # Synthetic symptom suffices for a diagnostic checklist, not a root-cause claim.
+  - name: diagnose-search-query-403
+    prompt: |
+      Our existing Azure AI Search query endpoint returns HTTP 403 when the app
+      uses its managed identity. The same query worked before yesterday's
+      identity change. What read-only checks should we do to narrow the cause?
+      Do not change roles or switch us to API keys.
+    tags:
+      type: integration
+      tier: smoke
+      cost: llm
+      area: routing
+      requiredSkills:
+        - foundry-iq
+      earlyTerminate: '[{"type":"skill-call","skill":"foundry-iq"},{"type":"tool-call-count","count":4}]'
+    graders:
+      - type: skill-invocation
+        config:
+          required:
+            - foundry-iq
+      - type: output-not-matches
+        config:
+          pattern: "(?i)fatal error|unhandled exception|stack trace"
+
+  # Required: missing/outdated results after Blob updates is ingestion diagnosis.
+  # No logs fixture: supplied state supports selecting diagnosis, not proving it.
+  - name: diagnose-stale-indexed-content
+    prompt: |
+      Our Blob-backed Azure AI Search indexer reports success, but newly uploaded
+      manuals are missing from results and edited manuals still show old text.
+      Help plan the checks against the existing ingestion pipeline; do not
+      create a replacement index or service yet.
+    tags:
+      type: integration
+      tier: full
+      cost: llm
+      area: routing
+      requiredSkills:
+        - foundry-iq
+      earlyTerminate: '[{"type":"skill-call","skill":"foundry-iq"},{"type":"tool-call-count","count":4}]'
+    graders:
+      - type: skill-invocation
+        config:
+          required:
+            - foundry-iq
+      - type: output-not-matches
+        config:
+          pattern: "(?i)fatal error|unhandled exception|stack trace"
+
+  # Required: promoting working grounded retrieval to a private regulated
+  # environment is harden-for-production; supplied facts exclude new build intent.
+  # No infrastructure fixture: asks for a migration plan, not IaC edits.
+  - name: harden-working-retrieval
+    prompt: |
+      Our working Foundry IQ retrieval prototype needs to move into regulated
+      production. Public network access is prohibited and authentication must
+      remain keyless. Outline a private-endpoint migration and verification
+      plan that preserves the existing sources and retrieval behavior.
+    tags:
+      type: integration
+      tier: full
+      cost: llm
+      area: routing
+      requiredSkills:
+        - foundry-iq
+      earlyTerminate: '[{"type":"skill-call","skill":"foundry-iq"},{"type":"tool-call-count","count":4}]'
+    graders:
+      - type: skill-invocation
+        config:
+          required:
+            - foundry-iq
+      - type: output-not-matches
+        config:
+          pattern: "(?i)fatal error|unhandled exception|stack trace"
+
+  # Required: measure-quality covers retrieval baseline before tuning.
+  # The labeled dataset is explicitly not supplied; no scores or invented labels
+  # are requested. No fixture is needed to design the measurement plan.
+  - name: plan-retrieval-quality-baseline
+    prompt: |
+      Our Azure AI Search answers include irrelevant passages and inconsistent
+      citations. Before tuning retrieval, help define a baseline measurement
+      plan. We have labeled questions and relevant document IDs, but I have not
+      supplied that dataset here. Do not change ranking or report scores yet.
+    tags:
+      type: integration
+      tier: full
+      cost: llm
+      area: routing
+      requiredSkills:
+        - foundry-iq
+      earlyTerminate: '[{"type":"skill-call","skill":"foundry-iq"},{"type":"tool-call-count","count":4}]'
+    graders:
+      - type: skill-invocation
+        config:
+          required:
+            - foundry-iq
+      - type: output-not-matches
+        config:
+          pattern: "(?i)fatal error|unhandled exception|stack trace"
+
+  # Disallowed: one readable policy excerpt is ordinary single-file work.
+  # Entire excerpt is inline; no implied file or durable retrieval requirement.
+  - name: negative-single-policy-excerpt
+    prompt: |
+      Summarize this complete excerpt from our travel policy in one sentence:
+      "Employees may expense economy rail tickets for approved business trips.
+      Receipts must be submitted within 30 days." This is all the text I need
+      help with.
+    tags:
+      type: integration
+      tier: smoke
+      cost: llm
+      area: negative-routing
+      requiredSkills:
+        - foundry-iq
+    graders:
+      - type: skill-invocation
+        config:
+          disallowed:
+            - foundry-iq
+
+  # Disallowed: a rename in supplied code is expressly excluded even though the
+  # variable says search. Inline code makes the task independent of the workspace.
+  - name: negative-inline-code-rename
+    prompt: |
+      Rename searchResults to products in this TypeScript snippet and return the
+      updated snippet: const searchResults = ["lamp", "desk"];
+      console.log(searchResults.length);
+    tags:
+      type: integration
+      tier: full
+      cost: llm
+      area: negative-routing
+      requiredSkills:
+        - foundry-iq
+    graders:
+      - type: skill-invocation
+        config:
+          disallowed:
+            - foundry-iq
+
+  # Disallowed: symbol lookup already answered by supplied repository-index
+  # evidence; no search-service integration or new retrieval system is requested.
+  # Paths are quoted evidence labels, not expected fixture files.
+  - name: negative-repository-symbol-lookup
+    prompt: |
+      Using only these repository search results, tell me where buildCatalog
+      is defined and where it is called:
+      src/catalog.ts:12: export function buildCatalog(items) { return items; }
+      src/main.ts:8: const catalog = buildCatalog(products);
+    tags:
+      type: integration
+      tier: full
+      cost: llm
+      area: negative-routing
+      requiredSkills:
+        - foundry-iq
+    graders:
+      - type: skill-invocation
+        config:
+          disallowed:
+            - foundry-iq
+
+  # Disallowed: a local Express authorization bug is ordinary code work, not a
+  # Search/Foundry failure. This challenges an over-broad interpretation of 403.
+  # Full relevant code is inline; no server, repo files or alternate skill needed.
+  - name: negative-unrelated-http-403
+    prompt: |
+      This local Express middleware returns HTTP 403 for every admin. Explain
+      the Boolean logic mistake and show the corrected condition:
+      if (role !== "admin" || role !== "owner") return res.sendStatus(403);
+      next();
+    tags:
+      type: integration
+      tier: full
+      cost: llm
+      area: negative-routing
+      requiredSkills:
+        - foundry-iq
+    graders:
+      - type: skill-invocation
+        config:
+          disallowed:
+            - foundry-iq
