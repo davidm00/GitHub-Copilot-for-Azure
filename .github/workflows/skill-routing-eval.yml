@@ -1,0 +1,224 @@
+name: Skill routing eval
+
+on:
+  workflow_dispatch:
+    inputs:
+      plugin:
+        description: Plugin directory under plugins/
+        required: true
+        type: string
+        default: foundry-iq-skills
+      skill:
+        description: Skill directory within the plugin
+        required: true
+        type: string
+        default: foundry-iq
+      model:
+        description: Copilot model ID
+        required: true
+        type: string
+        default: claude-sonnet-5
+
+permissions:
+  contents: read
+
+concurrency:
+  group: skill-routing-eval
+  cancel-in-progress: false
+
+jobs:
+  routing:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: bash
+    env:
+      VALLY_RUNNER_DISABLE_AZURE_MCP: "true"
+      DEBUG: ""
+      TEST_RUN_ID: skill-routing
+      PLUGIN: ${{ inputs.plugin }}
+      SKILL: ${{ inputs.skill }}
+      MODEL: ${{ inputs.model }}
+
+    steps:
+      - name: Checkout approved branch
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Validate selected target
+        run: |
+          if [[ ! "$PLUGIN" =~ ^[a-z0-9]+(-[a-z0-9]+)*$ ||
+                ! "$SKILL" =~ ^[a-z0-9]+(-[a-z0-9]+)*$ ||
+                ! "$MODEL" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]*$ ]]; then
+            echo "::error::Use plugin/skill directory names and a model ID."
+            exit 1
+          fi
+          if [[ ! -f "plugins/$PLUGIN/skills/$SKILL/SKILL.md" ||
+                ! -d "evals/$PLUGIN/$SKILL" ]]; then
+            echo "::error::Selected skill or eval directory is absent on this branch."
+            exit 1
+          fi
+
+      - name: Require separately configured Copilot credential
+        env:
+          COPILOT_GITHUB_TOKEN: ${{ secrets.COPILOT_EVAL_TOKEN }}
+        run: |
+          if [ -z "$COPILOT_GITHUB_TOKEN" ]; then
+            echo "::error::Configure COPILOT_EVAL_TOKEN with a personal fine-grained PAT granting Copilot Requests."
+            exit 1
+          fi
+
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22"
+
+      - name: Install dependencies and build
+        run: |
+          npm ci --ignore-scripts
+          npm ci --prefix scripts --ignore-scripts
+          npm ci --prefix tests
+          npm run build
+
+      - name: Validate selected skill suites
+        run: |
+          npm --prefix scripts run vally validate-stimulus
+          for suite in "$GITHUB_WORKSPACE/evals/$PLUGIN/$SKILL/"*.yaml; do
+            sha256sum "$suite"
+            node tests/node_modules/@microsoft/vally-cli/dist/index.js lint \
+              "$GITHUB_WORKSPACE/output/$PLUGIN/skills/$SKILL" \
+              --eval-spec "$suite" \
+              --grader-plugin "$GITHUB_WORKSPACE/tests/vally/vally-graders.ts" --strict
+          done
+
+      - name: Derive expected cases with the native Vally loader
+        working-directory: tests
+        run: |
+          node --input-type=module <<'NODE'
+          import fs from "node:fs";
+          import path from "node:path";
+          import { ProjectContext, loadEvalWithParams } from "@microsoft/vally";
+          const evalDir = path.resolve(process.env.GITHUB_WORKSPACE, "evals",
+            process.env.PLUGIN, process.env.SKILL);
+          // Match run-vally-test.ts: top-level .yaml files only, never fixture directories.
+          const files = fs.readdirSync(evalDir).filter(file => file.endsWith(".yaml")).sort();
+          if (!files.length) throw new Error("No top-level YAML suites found for the selected skill");
+          const context = await ProjectContext.load(evalDir);
+          const cases = [];
+          for (const file of files) {
+            const evalPath = path.join(evalDir, file);
+            const { spec } = await loadEvalWithParams(evalPath, { suiteParams: context.config.params });
+            const names = spec.stimuli.map(s => s.name);
+            if (!names.length || names.some(n => typeof n !== "string" || !n.trim()) ||
+              new Set(names).size !== names.length) {
+              throw new Error(`${file} must contain uniquely named cases`);
+            }
+            cases.push(...names.map(name => ({ evalName: spec.name, evalPath, name })));
+          }
+          fs.mkdirSync("results", { recursive: true });
+          fs.writeFileSync("results/expected-cases.json", JSON.stringify(cases, null, 2));
+          console.log(`Expecting all ${cases.length} cases across ${files.length} suites exactly once.`);
+          NODE
+
+      - name: Setup Copilot CLI without exporting credentials
+        id: copilot
+        uses: mvkaran/setup-copilot-cli@d05a47209e6b3185c9c55702bef49f28e6eebef7 # v1
+
+      - name: Record runtime versions
+        working-directory: tests
+        run: |
+          mkdir -p results
+          {
+            node --version
+            npm --version
+            copilot --version
+            npm ls @microsoft/vally-cli @github/copilot-sdk --depth=0
+            git rev-parse HEAD
+          } > results/versions.txt
+
+      - name: Check Copilot authentication and model availability without generation
+        working-directory: tests
+        env:
+          COPILOT_GITHUB_TOKEN: ${{ secrets.COPILOT_EVAL_TOKEN }}
+          COPILOT_CLI_PATH: ${{ steps.copilot.outputs.path }}
+        run: |
+          node --input-type=module <<'NODE'
+          import { CopilotClient, RuntimeConnection } from "@github/copilot-sdk";
+          const client = new CopilotClient({ connection: RuntimeConnection.forStdio(), logLevel: "error" });
+          try {
+            await client.start();
+            const auth = await client.getAuthStatus();
+            if (!auth.isAuthenticated) throw new Error("Copilot authentication failed");
+            const models = await client.listModels();
+            const model = models.find(m => m.id === process.env.MODEL);
+            if (!model || model.policy?.state === "disabled") {
+              throw new Error(`${process.env.MODEL} is unavailable or disabled`);
+            }
+            console.log(`Copilot authenticated; ${process.env.MODEL} is listed.`);
+          } finally {
+            await client.stop();
+          }
+          NODE
+
+      - name: Run selected cases once
+        working-directory: tests
+        env:
+          COPILOT_GITHUB_TOKEN: ${{ secrets.COPILOT_EVAL_TOKEN }}
+          COPILOT_CLI_PATH: ${{ steps.copilot.outputs.path }}
+        run: |
+          unset MODEL_OVERRIDE NO_SKILLS GH_TOKEN GITHUB_TOKEN
+          mkdir -p results
+          date -u +'%Y-%m-%dT%H:%M:%SZ' > results/native-start.txt
+          set +e
+          npm run test:vally -- --plugin "$PLUGIN" --skill "$SKILL" \
+            --model "$MODEL" --runs 1 --workers 1 --max-retries 0 \
+            --timeout 2m --require-pass \
+            --verbose > results/native-stdout.log 2> results/native-stderr.log
+          status=$?
+          date -u +'%Y-%m-%dT%H:%M:%SZ' > results/native-end.txt
+          printf '%s\n' "$status" > results/native-exit.txt
+          exit "$status"
+
+      - name: Require all expected cases to have passing usable trajectories
+        working-directory: tests
+        run: |
+          node --input-type=module <<'NODE'
+          import fs from "node:fs";
+          import path from "node:path";
+          const expected = JSON.parse(fs.readFileSync("results/expected-cases.json", "utf8"));
+          const caseKey = (evalPath, evalName, name) => JSON.stringify([path.resolve(evalPath), evalName, name]);
+          const expectedKeys = new Set(expected.map(c => caseKey(c.evalPath, c.evalName, c.name)));
+          const files = fs.readdirSync("results", { recursive: true })
+            .filter(p => path.basename(p) === "results.jsonl");
+          const trials = files.flatMap(p => fs.readFileSync(path.join("results", p), "utf8")
+            .trim().split("\n").filter(Boolean).map(line => JSON.parse(line)))
+            .filter(r => r.type === "trial-result");
+          for (const r of trials) {
+            console.log(`${r.gradeResult?.stimulusName ?? "unknown"}: ${r.status}, passed=${r.gradeResult?.passed}`);
+          }
+          const actualKeys = new Set(trials.map(r => caseKey(r.evalFilePath, r.evalName, r.stimulus)));
+          if (!expectedKeys.size || trials.length !== expectedKeys.size ||
+            actualKeys.size !== expectedKeys.size || trials.some(r =>
+            !expectedKeys.has(caseKey(r.evalFilePath, r.evalName, r.stimulus)) ||
+            r.status !== "success" || !r.trajectory || r.gradeResult?.passed !== true ||
+            r.model !== process.env.MODEL || !r.trajectory.events?.length ||
+            r.trajectory.events.some(event => event.type === "error") ||
+            (r.gradeResult.details?.some(g => g.graderType === "skill-invocation" &&
+              g.metadata?.disallowed?.length) && !r.trajectory.output?.trim()))) {
+            throw new Error(`Expected all ${expectedKeys.size} unique selected cases to have passing usable trajectories; aggregate PASS is insufficient`);
+          }
+          NODE
+
+      - name: Upload raw evidence even on failure
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: skill-routing-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 7
+          if-no-files-found: warn
+          path: |
+            tests/results/
+            tests/reports/test-run-skill-routing/
