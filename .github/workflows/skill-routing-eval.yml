@@ -40,6 +40,7 @@ jobs:
       PLUGIN: ${{ inputs.plugin }}
       SKILL: ${{ inputs.skill }}
       MODEL: ${{ inputs.model }}
+      RUNS: "5"
 
     steps:
       - name: Checkout approved branch
@@ -107,6 +108,8 @@ jobs:
           const files = fs.readdirSync(evalDir).filter(file => file.endsWith(".yaml")).sort();
           if (!files.length) throw new Error("No top-level YAML suites found for the selected skill");
           const context = await ProjectContext.load(evalDir);
+          const runs = Number(process.env.RUNS);
+          if (!Number.isInteger(runs) || runs < 1) throw new Error("RUNS must be a positive integer");
           const cases = [];
           for (const file of files) {
             const evalPath = path.join(evalDir, file);
@@ -116,11 +119,15 @@ jobs:
               new Set(names).size !== names.length) {
               throw new Error(`${file} must contain uniquely named cases`);
             }
-            cases.push(...names.map(name => ({ evalName: spec.name, evalPath, name })));
+            for (const name of names) {
+              for (let trialIndex = 0; trialIndex < runs; trialIndex++) {
+                cases.push({ evalName: spec.name, evalPath, name, trialIndex });
+              }
+            }
           }
           fs.mkdirSync("results", { recursive: true });
           fs.writeFileSync("results/expected-cases.json", JSON.stringify(cases, null, 2));
-          console.log(`Expecting all ${cases.length} cases across ${files.length} suites exactly once.`);
+          console.log(`Expecting ${runs} trials per case, ${cases.length} trials across ${files.length} suites.`);
           NODE
 
       - name: Setup Copilot CLI without exporting credentials
@@ -163,7 +170,7 @@ jobs:
           }
           NODE
 
-      - name: Run selected cases once
+      - name: Run selected cases with repetitions
         working-directory: tests
         env:
           COPILOT_GITHUB_TOKEN: ${{ secrets.COPILOT_EVAL_TOKEN }}
@@ -174,8 +181,8 @@ jobs:
           date -u +'%Y-%m-%dT%H:%M:%SZ' > results/native-start.txt
           set +e
           npm run test:vally -- --plugin "$PLUGIN" --skill "$SKILL" \
-            --model "$MODEL" --runs 1 --workers 1 --max-retries 0 \
-            --timeout 2m --require-pass \
+            --model "$MODEL" --runs "$RUNS" --workers 1 --max-retries 0 \
+            --timeout 10m --require-pass \
             --verbose > results/native-stdout.log 2> results/native-stderr.log
           status=$?
           date -u +'%Y-%m-%dT%H:%M:%SZ' > results/native-end.txt
@@ -189,26 +196,27 @@ jobs:
           import fs from "node:fs";
           import path from "node:path";
           const expected = JSON.parse(fs.readFileSync("results/expected-cases.json", "utf8"));
-          const caseKey = (evalPath, evalName, name) => JSON.stringify([path.resolve(evalPath), evalName, name]);
-          const expectedKeys = new Set(expected.map(c => caseKey(c.evalPath, c.evalName, c.name)));
+          const caseKey = (evalPath, evalName, name, trialIndex) =>
+            JSON.stringify([path.resolve(evalPath), evalName, name, trialIndex ?? 0]);
+          const expectedKeys = new Set(expected.map(c => caseKey(c.evalPath, c.evalName, c.name, c.trialIndex)));
           const files = fs.readdirSync("results", { recursive: true })
             .filter(p => path.basename(p) === "results.jsonl");
           const trials = files.flatMap(p => fs.readFileSync(path.join("results", p), "utf8")
             .trim().split("\n").filter(Boolean).map(line => JSON.parse(line)))
             .filter(r => r.type === "trial-result");
           for (const r of trials) {
-            console.log(`${r.gradeResult?.stimulusName ?? "unknown"}: ${r.status}, passed=${r.gradeResult?.passed}`);
+            console.log(`${r.stimulus}, trial ${(r.trialIndex ?? 0) + 1}: ${r.status}, passed=${r.gradeResult?.passed}`);
           }
-          const actualKeys = new Set(trials.map(r => caseKey(r.evalFilePath, r.evalName, r.stimulus)));
+          const actualKeys = new Set(trials.map(r => caseKey(r.evalFilePath, r.evalName, r.stimulus, r.trialIndex)));
           if (!expectedKeys.size || trials.length !== expectedKeys.size ||
             actualKeys.size !== expectedKeys.size || trials.some(r =>
-            !expectedKeys.has(caseKey(r.evalFilePath, r.evalName, r.stimulus)) ||
+            !expectedKeys.has(caseKey(r.evalFilePath, r.evalName, r.stimulus, r.trialIndex)) ||
             r.status !== "success" || !r.trajectory || r.gradeResult?.passed !== true ||
             r.model !== process.env.MODEL || !r.trajectory.events?.length ||
             r.trajectory.events.some(event => event.type === "error") ||
             (r.gradeResult.details?.some(g => g.graderType === "skill-invocation" &&
               g.metadata?.disallowed?.length) && !r.trajectory.output?.trim()))) {
-            throw new Error(`Expected all ${expectedKeys.size} unique selected cases to have passing usable trajectories; aggregate PASS is insufficient`);
+            throw new Error(`Expected all ${expectedKeys.size} unique selected trials to have passing usable trajectories; aggregate PASS is insufficient`);
           }
           NODE
 

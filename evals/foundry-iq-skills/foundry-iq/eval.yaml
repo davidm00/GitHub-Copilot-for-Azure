@@ -22,8 +22,8 @@ tags:
   skill: foundry-iq
 
 defaults:
-  runs: 1
-  timeout: "2m"
+  runs: 5
+  timeout: "10m"
   executor: integration-test-agent-runner
   model: claude-sonnet-5
 
