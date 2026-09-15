@@ -1,2 +1,5 @@
 .github/workflows/*.lock.yml linguist-generated=true
 *.sh text eol=lf
+# Preserve the approved Foundry IQ publication payload byte-for-byte.
+evals/foundry-iq-skills/foundry-iq/eval.yaml -text whitespace=cr-at-eol
+plugins/foundry-iq-skills/skills/foundry-iq/** -text whitespace=cr-at-eol
