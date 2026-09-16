@@ -1,43 +1,83 @@
-# Foundry IQ skills
+# Foundry IQ Skills
 
-Create a Foundry IQ knowledge base from local files, Azure Blob Storage, or an
-ADLS Gen2 directory; retrieve answers with original-source citations; and connect
-an existing Prompt or Hosted Agent to a knowledge base.
+Build search and grounded AI experiences with Azure AI Search ([Microsoft Foundry IQ](https://learn.microsoft.com/azure/search/agentic-retrieval-overview)).
 
-The `foundry-iq` skill guides resource intake, supported creation and reuse,
-retrieval verification, read-only diagnosis, and ownership-aware cleanup.
-It asks for approval before applying mutation plans. Supported source creation
-is limited to File and Blob-family sources; other connectors, multi-source
-creation or reconfiguration, classic Search index/query applications, and
-production hardening are outside this contribution.
+This plugin helps GitHub Copilot CLI guide you from setup through production, using your existing Azure resources when possible.
 
-## Local build and use
+## Skill
 
-From the repository root, run `npm run build`, then load the built plugin:
+- **foundry-iq**: Build, improve, and troubleshoot Azure AI Search applications and Foundry IQ knowledge experiences.
+
+## What it helps with
+
+- Add search to an application
+- Make local files, Blob Storage, SharePoint, or public websites searchable
+- Ground an existing agent in your organization's content
+- Return answers with citations while respecting user permissions
+- Measure and improve search quality
+- Prepare a search or knowledge solution for production
+- Troubleshoot access, ingestion, network, and missing-result problems
+
+The skill is intended for search and knowledge workloads. It is not needed for ordinary code edits or questions about a single file.
+
+## Prerequisites
+
+- [Git](https://git-scm.com/downloads), required to add the plugin marketplace
+- [GitHub Copilot CLI](https://github.com/github/copilot-cli)
+- Access to the Azure subscriptions and resources involved in your request
+- An authenticated Azure identity with the permissions required for the requested read or change
+
+If you use Azure CLI for authentication, install the [Azure CLI](https://learn.microsoft.com/cli/azure/install-azure-cli) and sign in:
 
 ```bash
-copilot --plugin-dir ./output/foundry-iq-skills
+az login
 ```
 
-```powershell
-copilot --plugin-dir .\output\foundry-iq-skills
+The plugin supports Copilot CLI on Windows and Linux. Depending on the task, it uses supported Azure SDK, REST, infrastructure-as-code, Azure MCP Server, or native knowledge-base MCP interfaces.
+
+## Installation
+
+Run these commands in Copilot CLI:
+
+```text
+/plugin marketplace add microsoft/azure-skills
+/plugin install foundry-iq-skills@azure-skills
 ```
 
-For example: "Make my local contracts searchable in a knowledge base with
-citations. Show me the costs before creating anything."
+To update the plugin:
 
-The plugin declares Azure MCP and uses the repository's shared, client-specific
-hooks. Node.js and an authenticated Azure context are needed for applicable
-operations; individual procedures explain Python helper and service prerequisites.
-No live Azure operation is performed by building the plugin.
+```text
+/plugin update foundry-iq-skills@azure-skills
+```
 
-## Review status
+## Example prompts
 
-This is a review draft, not a release-ready package. Plugin and skill version
-bases remain `1.0`; the intended `0.1` release base is unresolved. Source metadata
-uses `0.0.0-placeholder`, with real versions stamped only into build output.
-Human content/metadata approval and two authoring-team code owners are pending.
+- "Add production-ready search to this application using our existing product data."
+- "Make `./docs` searchable and answer questions with citations."
+- "Ground our existing agent in content from this Azure Blob container."
+- "Build a SharePoint assistant that respects each user's document permissions."
+- "Measure our retrieval quality and recommend one improvement."
+- "Find out why today's documents are missing from search results."
+- "Prepare this prototype for production with no public network access."
 
-The accompanying native eval suite grades skill invocation only, not successful
-Azure task completion. Candidate-matched model, client, and Azure validation
-must not be inferred from historical routing results.
+## Before changes are made
+
+The skill starts by inspecting your environment without changing it. It prefers existing resources and uses Microsoft Entra ID and managed identities by default.
+
+It asks for your approval before it:
+
+- Creates or scales resources that may cost money
+- Changes permissions, networking, or encryption
+- Uploads private content or sends it to an AI model
+- Changes production resources or replaces an index
+
+The skill does not delete Azure resources. It can provide a cleanup plan for you to review separately.
+
+## Learn more
+
+- [Azure AI Search overview](https://learn.microsoft.com/azure/search/search-what-is-azure-search)
+- [Foundry IQ and agentic retrieval](https://learn.microsoft.com/azure/search/agentic-retrieval-overview)
+- [Azure AI Search API and SDK versions](https://learn.microsoft.com/azure/search/search-api-versions)
+- [Azure AI Search REST API](https://learn.microsoft.com/en-us/rest/api/searchservice/?source=recommendations)
+- [Azure MCP Server tools for Azure AI Search](https://learn.microsoft.com/azure/developer/azure-mcp-server/tools/azure-ai-search)
+- [Foundry IQ skill details](skills/foundry-iq/SKILL.md)
