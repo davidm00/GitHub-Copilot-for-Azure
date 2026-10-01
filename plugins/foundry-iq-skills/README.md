@@ -93,3 +93,6 @@ Approval applies to the plan shown to you. If the plan changes, the skill asks a
 - [Azure AI Search (Foundry IQ) REST API](https://learn.microsoft.com/en-us/rest/api/searchservice/?source=recommendations)
 - [Azure MCP Server tools for Azure AI Search (Foundry IQ)](https://learn.microsoft.com/azure/developer/azure-mcp-server/tools/azure-ai-search)
 - [Foundry IQ skill details](skills/foundry-iq/SKILL.md)
+
+
+> TEST REHEARSAL ONLY: This fork-only draft exercises contribution preparation. Do not merge or release.
