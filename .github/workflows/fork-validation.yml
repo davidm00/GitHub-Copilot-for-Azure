@@ -1,0 +1,154 @@
+name: Bounded Foundry IQ validation
+on:
+  workflow_dispatch:
+    inputs:
+      candidate:
+        description: Reviewed candidate commit SHA
+        required: true
+        type: string
+permissions:
+  contents: read
+jobs:
+  codeql:
+    name: Python CodeQL (${{ matrix.version }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
+    strategy:
+      fail-fast: false
+      matrix:
+        version: [baseline, changed]
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          ref: ${{ matrix.version == 'baseline' && '8fbd59d7d1508a6aeb97030f4b46ca86b7653a11' || inputs.candidate }}
+          fetch-depth: 0
+      - name: Record source and runner
+        run: |
+          git rev-parse HEAD
+          uname -a
+          python3 --version
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@b96794f015dfd88f77b49b1c93e0fa7110f94c63
+        with:
+          languages: python
+          queries: security-and-quality
+          config: |
+            paths-ignore:
+              - tests/utils/__tests__/unit.test.ts
+      - name: Autobuild
+        uses: github/codeql-action/autobuild@b96794f015dfd88f77b49b1c93e0fa7110f94c63
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@b96794f015dfd88f77b49b1c93e0fa7110f94c63
+        with:
+          category: /language:python
+          output: codeql-results
+          upload: false
+      - name: Check actual findings
+        env:
+          EXPECTED: ${{ matrix.version == 'baseline' && '46' || '0' }}
+        run: |
+          python3 - <<'PY'
+          import collections, json, os, pathlib
+          runs = [run for path in pathlib.Path("codeql-results").glob("*.sarif")
+                  for run in json.loads(path.read_text())["runs"]]
+          assert runs, "Missing SARIF"
+          results = [result for run in runs for result in run.get("results", [])]
+          print(json.dumps({"count": len(results), "rules": dict(collections.Counter(
+              result["ruleId"] for result in results))}, indent=2))
+          assert all(i["executionSuccessful"] for run in runs for i in run["invocations"])
+          assert len(results) == int(os.environ["EXPECTED"]), "Unexpected findings: inspect SARIF"
+          PY
+      - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f
+        if: always()
+        with:
+          name: codeql-${{ matrix.version }}
+          path: codeql-results
+          if-no-files-found: error
+          retention-days: 7
+  scripts:
+    name: Included deterministic checks (${{ matrix.version }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        version: [baseline, changed]
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          ref: ${{ matrix.version == 'baseline' && '8fbd59d7d1508a6aeb97030f4b46ca86b7653a11' || inputs.candidate }}
+          fetch-depth: 0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: "24"
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: "3.12.3"
+      - name: Install without lifecycle scripts
+        run: |
+          npm ci --ignore-scripts
+          npm ci --ignore-scripts --prefix scripts
+          npm ci --ignore-scripts --prefix tests
+      - name: Build plugin output
+        run: npm run build
+      - name: Run all included non-integration tests
+        env:
+          CI: true
+        run: npm test --prefix tests
+      - name: Run original resource regressions with visible POSIX results
+        if: always() && matrix.version == 'changed'
+        run: python -B tests/foundry-iq-skills/foundry-iq/helper_regressions.py
+      - name: Identical baseline and packaged CLI fixtures
+        if: always()
+        env:
+          CANDIDATE: ${{ inputs.candidate }}
+        run: |
+          [[ "$CANDIDATE" =~ ^[0-9a-f]{40}$ ]] || exit 2
+          git show "$CANDIDATE:tests/foundry-iq-skills/foundry-iq/cli_regressions.py" > "$RUNNER_TEMP/cli_regressions.py"
+          for helpers in plugins/foundry-iq-skills/skills/foundry-iq/helpers output/foundry-iq-skills/skills/foundry-iq/helpers; do
+            for mode in direct package; do
+              FOUNDRY_HELPERS="$GITHUB_WORKSPACE/$helpers" FOUNDRY_IMPORT_MODE="$mode" python -B "$RUNNER_TEMP/cli_regressions.py"
+            done
+          done
+      - name: Included type and lint checks
+        if: always()
+        run: |
+          npm run typecheck --prefix tests
+          npm run typecheck --prefix scripts
+          npm run lint --prefix tests
+          npm run lint --prefix scripts
+      - name: Included structure and source checks
+        if: always()
+        run: |
+          npm run check:shell-scripts
+          npm run verifyBuildOutputVersions --prefix scripts
+          npm run frontmatter --prefix scripts
+          npm run references --prefix scripts
+          npm run checkCopilotCliCharBudget --prefix scripts
+      - name: Included line-ending check
+        if: always()
+        run: npm run check:line-endings
+      - name: Record known baseline token-budget result
+        if: always()
+        continue-on-error: true
+        run: |
+          mkdir -p validation-results
+          set +e
+          npm run tokens -- check > validation-results/token-budget.log 2>&1
+          result=$?
+          echo "Token budget exit status: $result"
+          printf '%s\n' "$result" > validation-results/token-budget-exit.txt
+          exit "$result"
+      - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f
+        if: always()
+        with:
+          name: scripts-${{ matrix.version }}
+          path: |
+            tests/reports/junit.xml
+            validation-results
+          if-no-files-found: error
+          retention-days: 7
