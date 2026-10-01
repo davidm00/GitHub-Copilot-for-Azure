@@ -132,7 +132,7 @@ jobs:
       - name: Included line-ending check
         if: always()
         run: npm run check:line-endings
-      - name: Record known baseline token-budget result
+      - name: Advisory - full repository token budget (upstream nonblocking policy)
         if: always()
         continue-on-error: true
         run: |
@@ -142,6 +142,11 @@ jobs:
           result=$?
           echo "Token budget exit status: $result"
           printf '%s\n' "$result" > validation-results/token-budget-exit.txt
+          if [ "$result" -ne 0 ]; then
+            echo "::warning::Repository token budget remains over limit; inspect retained report. This advisory is nonblocking upstream, not a passing token check."
+            grep -E 'Files Checked:|Files Exceeded:' validation-results/token-budget.log >> "$GITHUB_STEP_SUMMARY"
+            echo "Token check failed (exit $result); report retained. No thresholds or exclusions changed." >> "$GITHUB_STEP_SUMMARY"
+          fi
           exit "$result"
       - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f
         if: always()
