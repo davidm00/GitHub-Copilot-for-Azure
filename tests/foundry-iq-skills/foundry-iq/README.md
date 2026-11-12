@@ -1,26 +1,31 @@
-# Foundry IQ helper regressions
+# Foundry IQ entry-point regressions
 
-These deterministic tests exercise resource ownership, ACK/provenance retention,
-credential cleanup, shared readback contracts, File reuse, and direct/package
-imports. Transports and SDK seams are offline; no Azure sign-in or resources are used.
+The three Vitest cases run [entrypoint_regressions.py](entrypoint_regressions.py)
+against the current public distributable, not the intentionally retired helpers:
 
-`cli_regressions.py` runs the actual script/package entry points, argument parsing,
-JSON input/output, and orchestration for Search creation and partial success,
-File planning/reuse/local drift, Blob inventory planning/drift, and Prompt
-reuse/prerequisite failure. HTTP, token acquisition, and SDK objects are synthetic;
-these checks do **not** establish live Azure end-to-end behavior. Socket
-connections are prohibited. Both import modes run through the Vitest wrapper.
+- Runtime status rejects damaged wheel/lock files, escaping asset paths and an
+  unsupported manifest before setup or cache creation.
+- Runtime verification rejects stale receipts, pinned-package changes, added
+  packages and a different Python environment without rewriting the receipt.
+- The real prompt-binding CLI parses inputs and emits planned/blocked/created
+  JSON. Planning and stale approval never write. Approved creation preserves
+  existing settings and creates only a verified draft; failed or invalid
+  readback never replays the write.
 
-For a packaged-output or baseline comparison, set `FOUNDRY_HELPERS` to the
-absolute directory containing that version's helpers and run
-`cli_regressions.py` directly. Set `FOUNDRY_IMPORT_MODE=package` for package mode;
-otherwise direct-script mode is used. The same boundary fixtures and behavioral
-assertions run against either version.
+SDK clients, credentials and model objects are synthetic, following the former
+offline fixture pattern. These tests do not verify Azure SDK serialization or
+service acceptance. Socket connections, child processes and process replacement
+are forbidden inside the fixtures. No Azure login, installation or model runs occur.
 
-Run from the repository root with Python 3.12+ and the test dependencies installed:
+These are current-contract replacements, not equivalent coverage of retired
+Search creation, File reuse/upload, Blob inventory or helper cleanup behavior.
+Those business guarantees still need separately approved non-graph workflow
+evaluations. Old direct/package helper imports are no longer supported routes.
+
+Run from the repository root with Python 3.12 and the test dependencies installed:
 
 ```powershell
-$env:PYTHON = 'C:\path\to\python.exe' # Optional when python on PATH is 3.12+
+$env:PYTHON = 'C:\path\to\python.exe' # Optional when python on PATH is 3.12
 npm --prefix tests test -- foundry-iq-skills/foundry-iq/helpers.test.ts
 ```
 
@@ -31,14 +36,12 @@ PYTHON=/path/to/python3.12 npm --prefix tests test -- foundry-iq-skills/foundry-
 The underlying standard-library suite can also run directly:
 
 ```powershell
-python -B .\tests\foundry-iq-skills\foundry-iq\helper_regressions.py
+python -B .\tests\foundry-iq-skills\foundry-iq\entrypoint_regressions.py
 ```
 
 ```bash
-python3.12 -B ./tests/foundry-iq-skills/foundry-iq/helper_regressions.py
+python3.12 -B ./tests/foundry-iq-skills/foundry-iq/entrypoint_regressions.py
 ```
 
-The real POSIX permission/link case skips on Windows; mocked descriptor transfer,
-reverse cleanup, conversion failure, and primary-error cases run on both platforms.
-CodeQL validation must still extract the full repository and run the complete
-Python `security-and-quality` suite; these runtime tests do not substitute for it.
+No tests are skipped by platform. These checks do not replace CodeQL, native build,
+client compatibility, graph eval discovery/executor or source export gates.

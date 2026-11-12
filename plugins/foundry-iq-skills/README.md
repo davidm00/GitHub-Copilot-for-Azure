@@ -2,7 +2,7 @@
 
 Build grounded knowledge experiences with [Azure AI Search (Foundry IQ)](https://learn.microsoft.com/azure/search/agentic-retrieval-overview).
 
-This plugin helps GitHub Copilot CLI create and use Foundry IQ knowledge bases, using your existing Azure resources when possible.
+This plugin helps GitHub Copilot CLI use Azure AI Search and Foundry IQ, improve retrieval quality, and work with knowledge graphs, using your existing Azure resources when possible.
 
 ## Telemetry
 
@@ -14,26 +14,24 @@ the agent.
 
 ## Skill
 
-- **foundry-iq**: Build, connect, query, and troubleshoot Foundry IQ knowledge experiences using supported Azure resources.
+- **foundry-iq**: Azure AI Search and Foundry IQ guidance, retrieval-quality evaluation, and graph workflows.
 
 ## What it helps with
 
-- Create or reuse an Azure AI Search (Foundry IQ) service
-- Create a File knowledge source from local files
-- Create a knowledge source from Azure Blob Storage or Azure Data Lake Storage
-- Create a knowledge base and validate that its content is searchable
-- Query an existing knowledge base and return citations
-- Connect an existing knowledge base to an agent
-- Diagnose knowledge base failures and unsupported requests
-- Prepare a cleanup plan for resources created by the workflow
+- Follow verified Azure AI Search and Foundry IQ API guidance
+- Investigate Foundry grounding and connectivity failures
+- Measure retrieval quality against a baseline and compare improvements
+- Choose, provision, build, and consume entity graphs, topic graphs, ontologies, and grounding workflows
+- Apply source-aware security and explicit approval before resource changes
 
-The skill is intended for Foundry IQ knowledge-base workflows. It does not support classic Azure AI Search (Foundry IQ) application, index, or query development, generic agent creation, or repository-file search.
+The skill routes requests to curated workflows where available and otherwise uses official Azure AI Search documentation. It does not cover unrelated Azure products or continuous evaluation.
 
 ## Prerequisites
 
 - [Git](https://git-scm.com/downloads), required to add the plugin marketplace
 - [GitHub Copilot CLI](https://github.com/github/copilot-cli)
-- [Python 3.12 or later](https://www.python.org/downloads/), required to run the plugin's helper scripts
+- [Python 3.12](https://www.python.org/downloads/), required for the bundled graph runtimes
+- [Node.js](https://nodejs.org/), required for the graph MCP launcher
 - Access to the Azure subscriptions and resources involved in your request
 - An authenticated Azure identity with the permissions required for the requested read or change
 
@@ -43,7 +41,7 @@ If you use Azure CLI for authentication, install the [Azure CLI](https://learn.m
 az login
 ```
 
-The plugin supports Copilot CLI on Windows and Linux. Depending on the task, it uses supported Azure SDK, REST, infrastructure-as-code, Azure MCP Server, or native knowledge-base MCP interfaces.
+The graph runtime includes dependency locks for Windows x64, Linux x64/ARM64, and macOS Apple Silicon. Cold setup needs network access to the configured Python package source. Setup creates isolated environments outside the plugin; it does not download Python. The plugin registers Azure MCP and the entity graph MCP server, while the other graph adapters use explicitly scoped launches described in the skill.
 
 ## Installation
 

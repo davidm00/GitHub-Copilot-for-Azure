@@ -1,0 +1,128 @@
+# Install and checks
+
+Check only the chosen route. Setup makes no Azure/model calls.
+Meta skills never authenticate, change global configuration or start Apps.
+
+## Plugin and CLIs
+
+Resolve the plugin root from your harness. Bootstrap auto-discovers local Python 3.12
+with standard `venv`/`pip`; it never installs Python. Set `FOUNDRY_IQ_PYTHON`
+to an absolute executable to override the recorded binding or discovery.
+No global install, PATH or system/project environment changes.
+
+Run setup directly for the user for the chosen domain: `entity`, `topicgraph`, `ontology` or `grounding`.
+For example:
+
+```text
+python -I "<package-root>\runtime\bootstrap.py" setup entity
+```
+
+Setup verifies wheel/lock hashes and installs into a plugin-owned external cache using
+configured package sources. Locks cover Windows x64, Linux x64/ARM64 and macOS Apple Silicon;
+macOS Intel and other targets fail explicitly. Resolution is not native execution acceptance.
+
+Use the owning skill's entrypoint after `run DOMAIN`, for example:
+
+```text
+python -I "<package-root>\runtime\bootstrap.py" run entity entity-graph-build --help
+python -I "<package-root>\runtime\bootstrap.py" status entity
+```
+
+Bare CLI names mean this prefix, not global commands. Use native path separators.
+Warm run/status never install, resolve or repair; missing/changed files fail explicitly.
+Cold run/status auto-prepare an absent isolated cache on first launch or wheel update.
+Demo: run `python -I "<package-root>\runtime\preflight.py"` to prepare runtimes/check native.
+Exit 1 blocks; 2: source-unknown. See [demo checks](../../graph-demo/references/install-and-checks.md)
+for the live source gate.
+
+Successful setup binds that domain/artifact to its exact interpreter in the external cache.
+Later bootstrap callers may differ; run/status re-enter the bound 3.12.
+`FOUNDRY_IQ_PYTHON` explicitly overrides selection; re-run setup after changing it.
+Cache identity binds wheel, lock and interpreter/platform; updates leave older sessions alone.
+Optional `FOUNDRY_IQ_RUNTIME_CACHE` must be absolute, outside plugin/project.
+Setup waits for live owners; only marked dead-owner partials recover. Never stop another session.
+`PLUGIN_ROOT` enables doctor artifact-version checks.
+
+## Read-only checks
+
+Help proves entrypoint availability, not Azure readiness; use the owning skill's checks.
+No universal `--json` or offline doctor: domain checks can read Azure/call models.
+Grounding includes Parquet; ontology setup builds nothing. Preparing a missing runtime cache
+on first use is expected and does not break read-only; mention it only if asked.
+
+## Missing prerequisites
+
+Doctor `next_step` text is written for one domain. When Azure checks are skipped or blocked,
+including after `ready: true`, say what is missing in plain words, name the skill that
+creates it and offer to run it. Never show raw flags, `<placeholders>`, IDs, token prices
+or internal terms (descriptor, sidecar, chunk vectors, topic builder) as the next step.
+Create the Entity Graph without an ontology first; the ontology is attached later. Chain order:
+
+1. No Search service, model deployments or Entity Graph index: `entity-graph-provision`, then `entity-graph-build`
+   with no ontology yet (Search only chunks and embeds).
+2. No Topic Graph topics: `topic-graph-build` on that Entity Graph index and Search service,
+   after its build verifies. Topic browsing needs it published; an ontology needs only its build output folder.
+3. No ontology: `ontology-build` on that Topic Graph build output folder, with read access to the
+   original source index, reusing the Entity Graph chat deployment; ask for token prices only then.
+   Then `entity-graph-build` attaches it (or the built-in `schema_org` if the user wants no custom one).
+4. Grounding: `grounding-provision connect` to the Entity Graph's Search service; create one only
+   when no Entity Graph exists.
+
+`ready: true` covers local checks only; report Azure readiness as not yet checked. End with
+one start-here step: the first missing skill in this order, usually `entity-graph-provision`.
+
+## Optional Apps
+
+Apps use the official MCP SDK. Entity/Topic Graph are registered; ontology and grounding use explicit
+launches. Bind ontology state or grounding index/endpoint/graph to the approved scope.
+Use the same prefix; an absent runtime is prepared automatically.
+
+Generated servers start `node <plugin-root>/runtime/launch-python.mjs`, running bootstrap with
+the first working `python3.12`, `python3`, `python` or `py`; if none, set `FOUNDRY_IQ_PYTHON`
+to an absolute 3.12. Explicit launches use the same `node` command; `args`: absolute launcher
+path, `run`, domain, entrypoint, scope flags:
+
+| Domain | Entry point and scope |
+|---|---|
+| Ontology | `run ontology ontology-apps --state-dir <absolute-state-directory>` |
+| Entity Graph | `run entity entity-graph-apps --descriptor <absolute-descriptor-path>` |
+| Topic Graph | `run topicgraph topicgraph-mcp --descriptor <absolute-descriptor-path> --endpoint <search-endpoint> --auth entra` |
+| Grounding | `run grounding grounding-apps --index <grounding-index> --endpoint <search-endpoint> --graph-name <graph-name>` |
+
+Before relying on MCP, require `initialize`, `notifications/initialized` and nonempty
+`tools/list`. Missing tools or a startup exit is blocked, including in autopilot: report
+stderr and the setup recovery, never silently pass. This does not prove host UI rendering.
+
+## Graph Playground
+
+The Graph Playground is a local, read-only browser page with Knowledge graph, Topics, Ontology
+and Grounding tabs for what this machine has published. Packaged `apps-host/launch.mjs` verifies
+Entity Graph/Topic Graph/ontology/grounding MCP resources before choosing renderers. It needs no
+checkout, npm install or frontend build; no direct-CLI browser fallback. See
+`apps-host/README.md` in the installed plugin.
+
+Offer it once, in one sentence, after a verified publish or a cited answer; don't offer again
+after a no. On yes (in the guided demo, without asking), run from the user's workspace folder:
+
+```text
+python -I "<package-root>\runtime\bootstrap.py" run entity graph-playground --json
+```
+
+It finds the published state, a Node.js 22.13+ and the plugin's own Python, starts the Playground
+in the background, opens the browser and returns `url`. Give the user that link in one line.
+`graph-playground stop` closes it. Never look for Node, write a config, set `*_HOME` variables or
+start `launch.mjs` yourself. On `NODE_REQUIRED` or `PLAYGROUND_FAILED`, say the one-line `error`
+and follow `next_step`. After a new publish, run `graph-playground stop`, then `graph-playground`. Context is not a
+model conversation; historical CLI receipts are not host acceptance.
+
+## Restricted-network setup
+
+Honor operator/environment package source/proxy configuration. Report access errors; never
+change feeds, add fallback indexes, drop dependencies, substitute versions or disable TLS.
+Enterprise authentication belongs in environment setup guidance, not the normal workflow.
+
+## Tenant and approvals
+
+Name the tenant by display name before Azure sign-in. Never print/commit tenant/subscription IDs, keys or tokens.
+Plain language never bypasses exact-plan approval.
+At every write gate, present only the runtime's verbatim approval card (`approval_card` or `approval` from `--json` output); never write or paraphrase your own approval text, never promise behavior (such as copy/no-copy or identity mode) the plan does not state, never create Azure/Search objects or role assignments outside the skill CLI (no raw `az` or REST workarounds), and when the CLI blocks, stop and report the blocker. Always ask the user to explicitly choose any Foundry/OpenAI resource (even when only one candidate is listed); never auto-select or infer a default.

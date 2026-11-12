@@ -1,0 +1,138 @@
+name: foundry-iq-search-requests-integration-eval
+description: Non-graph routing for Search guidance, source security and existing-agent attachment.
+
+tags:
+  type: integration
+  skill: foundry-iq
+
+defaults:
+  runs: 1
+  timeout: "2m"
+  executor: copilot-sdk-agent-runner
+  model: claude-sonnet-5
+
+scoring:
+  threshold: 1.0
+
+stimuli:
+  - name: Search guidance without Azure access
+    prompt: >-
+      I do not have Azure access right now. Explain when to combine keyword,
+      vector and semantic search in Azure AI Search for a document search application.
+    tags:
+      type: integration
+      tier: smoke
+      cost: llm
+      area: routing
+      requiredSkills:
+        - foundry-iq
+      earlyTerminate: '[{"type":"skill-call","skill":"foundry-iq"},{"type":"tool-call-count","count":3}]'
+    graders:
+      - type: skill-invocation
+        config:
+          required:
+            - foundry-iq
+      - type: output-not-matches
+        config:
+          pattern: "(?i)fatal error|unhandled exception|stack trace"
+
+  - name: Index REST guidance without execution
+    prompt: >-
+      Show how to define an Azure AI Search index with searchable text and a
+      vector field using the current documented REST contract. Explain what
+      API-version and embedding details you need before giving a final request.
+      Do not send requests.
+    tags:
+      type: integration
+      tier: full
+      cost: llm
+      area: routing
+      requiredSkills:
+        - foundry-iq
+      earlyTerminate: '[{"type":"skill-call","skill":"foundry-iq"},{"type":"tool-call-count","count":3}]'
+    graders:
+      - type: skill-invocation
+        config:
+          required:
+            - foundry-iq
+      - type: output-not-matches
+        config:
+          pattern: "(?i)fatal error|unhandled exception|stack trace"
+
+  - name: Protected SharePoint source planning
+    prompt: >-
+      Help me plan a Foundry IQ knowledge base over SharePoint documents.
+      Each user must only retrieve documents they are allowed to read.
+      Reuse an existing Search service; do not create resources or change permissions.
+    tags:
+      type: integration
+      tier: full
+      cost: llm
+      area: routing
+      requiredSkills:
+        - foundry-iq
+      earlyTerminate: '[{"type":"skill-call","skill":"foundry-iq"},{"type":"tool-call-count","count":3}]'
+    graders:
+      - type: skill-invocation
+        config:
+          required:
+            - foundry-iq
+      - type: output-not-matches
+        config:
+          pattern: "(?i)fatal error|unhandled exception|stack trace"
+
+  - name: Existing agent attachment planning
+    prompt: >-
+      I already have a Foundry agent and a working Foundry IQ knowledge base.
+      Help me plan connecting that existing agent to the KB without changing
+      its other tools or instructions. Do not apply changes.
+    tags:
+      type: integration
+      tier: full
+      cost: llm
+      area: routing
+      requiredSkills:
+        - foundry-iq
+      earlyTerminate: '[{"type":"skill-call","skill":"foundry-iq"},{"type":"tool-call-count","count":3}]'
+    graders:
+      - type: skill-invocation
+        config:
+          required:
+            - foundry-iq
+      - type: output-not-matches
+        config:
+          pattern: "(?i)fatal error|unhandled exception|stack trace"
+
+  - name: "Negative: local Python sorting"
+    prompt: >-
+      Write a Python expression that sorts a list of integers in descending
+      order without modifying the original list.
+    tags:
+      type: integration
+      tier: full
+      cost: llm
+      area: negative-routing
+      requiredSkills:
+        - foundry-iq
+    graders:
+      - type: skill-invocation
+        config:
+          disallowed:
+            - foundry-iq
+
+  - name: "Negative: Excel conditional sum"
+    prompt: >-
+      Give me an Excel formula to sum cells B2 through B10 only when the
+      corresponding cells in A2 through A10 contain the word Paid.
+    tags:
+      type: integration
+      tier: full
+      cost: llm
+      area: negative-routing
+      requiredSkills:
+        - foundry-iq
+    graders:
+      - type: skill-invocation
+        config:
+          disallowed:
+            - foundry-iq

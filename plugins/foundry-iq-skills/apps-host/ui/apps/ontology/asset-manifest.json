@@ -1,0 +1,41 @@
+{
+  "schemaVersion": 1,
+  "domain": "ontology",
+  "server": "ontology-skills",
+  "sourceCommit": "316f5112488398b3c557d7e8f59c09d10e3a9367",
+  "sourceTree": "b5a21f512afd0da42665dfd64ed36ba46e7fb36f",
+  "sourceDirty": false,
+  "lockfileSha256": "2b8a74632a91698815a20cef37af9cbd85b084bf0b1048d78e2fdf5b92371c8e",
+  "entries": {
+    "ontology_present": {
+      "html": "ontology.html",
+      "uri": "ui://ontology-skills/ontology.html",
+      "embeddedHtmlSha256": "77685a8c1281dd5d2c3614af9e56c452f4d5f79105492d62daa829514d1525b7"
+    },
+    "ontology_present_evidence": {
+      "html": "evidence.html",
+      "uri": "ui://ontology-skills/evidence.html",
+      "embeddedHtmlSha256": "62e92fd51d591d8676b0ec9905a7be7fceea185b9d8796fac16b40fe2df9c579"
+    }
+  },
+  "files": {
+    "THIRD_PARTY_NOTICES.txt": "67d2b57fb874e32f7cf71304b612cce755513b5e7cf911957b1297c831c6a6bc",
+    "assets/evidence-BHRh4crD.js": "a5f55f7a9a153258e40b5e526cf90533f711dc2bdba11652a89af6fa5c4f7a4e",
+    "assets/ontology-DDg9Rp_n.js": "b21c1c4f6851c73b91c6c9d102aec51baad2027f5892cd9df1ee7c775adfc1d4",
+    "assets/style-j6Y5aQZ4.js": "9bf11d5484cb7e721330ff1ac707e1f1d16f8f25907a4583a458e5d222c987a8",
+    "assets/ontology-DnJYz8vx.css": "93ed0451ccfbec44a09f65e902bd71377e2f33e95b05cd366de1426beaa1f761",
+    "assets/style-BVJUzGTX.css": "53b0fe759b3576c2a7f76e2f10a8c3bbeb4d699780ebee6ae4f69bb41673a68a",
+    "evidence.html": "052dc95e7e8df1f707ef23e2290895e404a2d81c01a68bd0ea5cb7742bdafc96",
+    "ontology.html": "0d07f915d8e455675b3099ca3bace786e4565c14e957f79045d4c10165b4fd3b"
+  },
+  "reports": {
+    "ontology_present": {
+      "gzipJsCssBytes": 534194,
+      "budgetBytes": 1048576
+    },
+    "ontology_present_evidence": {
+      "gzipJsCssBytes": 141252,
+      "budgetBytes": 204800
+    }
+  }
+}

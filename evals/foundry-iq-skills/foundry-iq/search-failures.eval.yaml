@@ -1,0 +1,83 @@
+name: foundry-iq-search-failures-integration-eval
+description: Non-graph routing for access, ingestion freshness and Foundry grounding failures.
+
+tags:
+  type: integration
+  skill: foundry-iq
+
+defaults:
+  runs: 1
+  timeout: "2m"
+  executor: copilot-sdk-agent-runner
+  model: claude-sonnet-5
+
+scoring:
+  threshold: 1.0
+
+stimuli:
+  - name: Search access failure before permission changes
+    prompt: >-
+      My application receives HTTP 403 when querying an Azure AI Search index,
+      but I can see the service in the portal. Help me diagnose which identity
+      and permissions to check before changing anything.
+    tags:
+      type: integration
+      tier: full
+      cost: llm
+      area: routing
+      requiredSkills:
+        - foundry-iq
+      earlyTerminate: '[{"type":"skill-call","skill":"foundry-iq"},{"type":"tool-call-count","count":3}]'
+    graders:
+      - type: skill-invocation
+        config:
+          required:
+            - foundry-iq
+      - type: output-not-matches
+        config:
+          pattern: "(?i)fatal error|unhandled exception|stack trace"
+
+  - name: Ingestion freshness before ranking changes
+    prompt: >-
+      An Azure AI Search indexer says it succeeded, but documents added yesterday
+      are missing from the index. Help me investigate freshness and ingestion
+      before I change ranking settings. Do not run or reset the indexer.
+    tags:
+      type: integration
+      tier: full
+      cost: llm
+      area: routing
+      requiredSkills:
+        - foundry-iq
+      earlyTerminate: '[{"type":"skill-call","skill":"foundry-iq"},{"type":"tool-call-count","count":3}]'
+    graders:
+      - type: skill-invocation
+        config:
+          required:
+            - foundry-iq
+      - type: output-not-matches
+        config:
+          pattern: "(?i)fatal error|unhandled exception|stack trace"
+
+  - name: Existing agent grounding integration failure
+    prompt: >-
+      My existing Foundry agent answers from memory even though its Foundry IQ
+      knowledge base retrieves the right documents when queried directly.
+      Help me investigate whether the agent actually uses that KB, without
+      editing the agent.
+    tags:
+      type: integration
+      tier: full
+      cost: llm
+      area: routing
+      requiredSkills:
+        - foundry-iq
+      earlyTerminate: '[{"type":"skill-call","skill":"foundry-iq"},{"type":"tool-call-count","count":3}]'
+    graders:
+      - type: skill-invocation
+        config:
+          required:
+            - foundry-iq
+      - type: output-not-matches
+        config:
+          pattern: "(?i)fatal error|unhandled exception|stack trace"
