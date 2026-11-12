@@ -1,0 +1,84 @@
+name: foundry-iq-retrieval-quality-integration-eval
+description: Non-graph routing for fixed-batch improvement, baseline-only evaluation and question generation.
+
+tags:
+  type: integration
+  skill: foundry-iq
+
+defaults:
+  runs: 1
+  timeout: "2m"
+  executor: copilot-sdk-agent-runner
+  model: claude-sonnet-5
+
+scoring:
+  threshold: 1.0
+
+stimuli:
+  - name: Fixed-batch retrieval improvement plan
+    prompt: >-
+      My Azure AI Search application returns current documents, but its answers
+      miss relevant passages. I have ten representative questions.
+      Help me plan a fixed-batch baseline, an approved retrieval change, and a
+      comparison before deciding whether to keep it.
+    tags:
+      type: integration
+      tier: full
+      cost: llm
+      area: routing
+      requiredSkills:
+        - foundry-iq
+      earlyTerminate: '[{"type":"skill-call","skill":"foundry-iq"},{"type":"tool-call-count","count":3}]'
+    graders:
+      - type: skill-invocation
+        config:
+          required:
+            - foundry-iq
+      - type: output-not-matches
+        config:
+          pattern: "(?i)fatal error|unhandled exception|stack trace"
+
+  - name: Baseline-only cloud evaluation without gold answers
+    prompt: >-
+      Evaluate the current retrieval quality of my document-grounded Foundry
+      agent using a fixed set of questions. I have no gold answers.
+      I only want a baseline with Foundry cloud evaluators, not optimization or
+      recurring monitoring; ask for the target and data approvals before running anything.
+    tags:
+      type: integration
+      tier: full
+      cost: llm
+      area: routing
+      requiredSkills:
+        - foundry-iq
+      earlyTerminate: '[{"type":"skill-call","skill":"foundry-iq"},{"type":"tool-call-count","count":3}]'
+    graders:
+      - type: skill-invocation
+        config:
+          required:
+            - foundry-iq
+      - type: output-not-matches
+        config:
+          pattern: "(?i)fatal error|unhandled exception|stack trace"
+
+  - name: Reviewable evaluation-question generation
+    prompt: >-
+      Help me create a reviewable evaluation question set for an Azure AI Search
+      application from source excerpts I will supply after we agree the scope.
+      Do not invent reference answers or run evaluation yet.
+    tags:
+      type: integration
+      tier: full
+      cost: llm
+      area: routing
+      requiredSkills:
+        - foundry-iq
+      earlyTerminate: '[{"type":"skill-call","skill":"foundry-iq"},{"type":"tool-call-count","count":3}]'
+    graders:
+      - type: skill-invocation
+        config:
+          required:
+            - foundry-iq
+      - type: output-not-matches
+        config:
+          pattern: "(?i)fatal error|unhandled exception|stack trace"
