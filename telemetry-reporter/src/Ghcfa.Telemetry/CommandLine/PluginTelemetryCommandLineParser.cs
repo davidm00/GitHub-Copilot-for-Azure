@@ -25,6 +25,9 @@ public sealed class PluginTelemetryCommandLineParser
         "--skill-version",
         "--tool-name",
         "--file-reference",
+        "--allowed-skills",
+        "--allowed-references",
+        "--allowed-tools",
         "--dangerously-write-support-logs-to-dir"
     };
 
@@ -107,10 +110,17 @@ public sealed class PluginTelemetryCommandLineParser
                 value = args[++index];
             }
 
+            if (optionName is "--allowed-skills" or "--allowed-references" or "--allowed-tools" &&
+                string.IsNullOrWhiteSpace(value))
+            {
+                return CommandLineParseResult.Error($"Option '{optionName}' requires a non-empty path.");
+            }
+
             values.Add(optionName, value);
         }
 
-        var missingOptions = new[] { "--timestamp", "--event-type", "--session-id" }
+        var missingOptions = new[]
+            { "--timestamp", "--event-type", "--session-id", "--allowed-skills", "--allowed-references", "--allowed-tools" }
             .Where(option => !values.TryGetValue(option, out var value) || string.IsNullOrWhiteSpace(value))
             .ToArray();
 
@@ -132,6 +142,9 @@ public sealed class PluginTelemetryCommandLineParser
             SkillVersion = GetValue(values, "--skill-version"),
             ToolName = GetValue(values, "--tool-name"),
             FileReference = GetValue(values, "--file-reference"),
+            AllowedSkills = values["--allowed-skills"]!,
+            AllowedReferences = values["--allowed-references"]!,
+            AllowedTools = values["--allowed-tools"]!,
             Debug = values.TryGetValue("--debug", out var debugValue) &&
                 bool.TryParse(debugValue, out var debug) &&
                 debug,

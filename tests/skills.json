@@ -50,6 +50,21 @@
             }
         },
         {
+            "name": "aks-skills",
+            "dirname": "aks-skills",
+            "skills": [
+                "aks-cost-optimization",
+                "aks-gpu-inference",
+                "aks-known-issues",
+                "aks-network-capture",
+                "aks-troubleshooting",
+                "azure-search-nav"
+            ],
+            "integrationTestSchedule": {
+                "0 12 * * 2-6": "aks-cost-optimization,aks-gpu-inference,aks-known-issues,aks-network-capture,aks-troubleshooting,azure-search-nav"
+            }
+        },
+        {
             "name": "azure-kusto-graph-skills",
             "dirname": "azure-kusto-graph-skills",
             "skills": [
@@ -83,6 +98,18 @@
             ],
             "integrationTestSchedule": {
                 "0 12 * * 2-6": "azure-local,azure-local-multi-rack"
+            }
+        },
+        {
+            "name": "azure-advisor",
+            "dirname": "azure-advisor",
+            "skills": [
+                "azure-advisor",
+                "azure-advisor-actionability",
+                "azure-advisor-cost-optimization"
+            ],
+            "integrationTestSchedule": {
+                "0 12 * * 2-6": "azure-advisor,azure-advisor-actionability,azure-advisor-cost-optimization"
             }
         }
     ]

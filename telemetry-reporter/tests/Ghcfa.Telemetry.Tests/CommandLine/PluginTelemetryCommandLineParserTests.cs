@@ -25,6 +25,9 @@ public sealed class PluginTelemetryCommandLineParserTests
             "--skill-version", "2.0.0",
             "--tool-name", "azure-storage",
             "--file-reference", "azure-ai\\references\\auth-best-practices.md",
+            "--allowed-skills", "allowed skills.txt",
+            "--allowed-references", "references.txt",
+            "--allowed-tools", "tools.json",
             "--debug",
             "--dangerously-write-support-logs-to-dir", "logs"
         ]);
@@ -42,8 +45,72 @@ public sealed class PluginTelemetryCommandLineParserTests
         Assert.Equal("2.0.0", options.SkillVersion);
         Assert.Equal("azure-storage", options.ToolName);
         Assert.Equal("azure-ai\\references\\auth-best-practices.md", options.FileReference);
+        Assert.Equal("allowed skills.txt", options.AllowedSkills);
+        Assert.Equal("references.txt", options.AllowedReferences);
+        Assert.Equal("tools.json", options.AllowedTools);
         Assert.True(options.Debug);
         Assert.Equal("logs", options.DangerouslyWriteSupportLogsToDir);
+    }
+
+    [Theory]
+    [InlineData("--allowed-skills")]
+    [InlineData("--allowed-references")]
+    [InlineData("--allowed-tools")]
+    public void Parse_BindsInlineAllowlistPaths(string option)
+    {
+        var result = _parser.Parse(
+        [
+            "--timestamp", "timestamp",
+            "--event-type", "event",
+            "--session-id", "session",
+            $"--allowed-skills={(option == "--allowed-skills" ? "lists with spaces/allowed.txt" : "skills.txt")}",
+            $"--allowed-references={(option == "--allowed-references" ? "lists with spaces/allowed.txt" : "references.txt")}",
+            $"--allowed-tools={(option == "--allowed-tools" ? "lists with spaces/allowed.txt" : "tools.json")}"
+        ]);
+
+        Assert.True(result.IsSuccess);
+        var options = result.Options!;
+        var path = option switch
+        {
+            "--allowed-skills" => options.AllowedSkills,
+            "--allowed-references" => options.AllowedReferences,
+            _ => options.AllowedTools
+        };
+        Assert.Equal("lists with spaces/allowed.txt", path);
+    }
+
+    [Fact]
+    public void Parse_RejectsOmittedAllowlistPaths()
+    {
+        var result = _parser.Parse(
+            ["--timestamp", "timestamp", "--event-type", "event", "--session-id", "session"]);
+
+        Assert.False(result.IsSuccess);
+        Assert.Equal("Missing Required options: --allowed-skills, --allowed-references, --allowed-tools",
+            result.ErrorMessage);
+    }
+
+    [Theory]
+    [InlineData("--allowed-skills")]
+    [InlineData("--allowed-references")]
+    [InlineData("--allowed-tools")]
+    public void Parse_RejectsMalformedAllowlistOptions(string option)
+    {
+        Assert.Equal(
+            $"Option '{option}' requires a value.",
+            _parser.Parse([option]).ErrorMessage);
+        Assert.Equal(
+            $"Option '{option}' requires a value.",
+            _parser.Parse([option, "--debug"]).ErrorMessage);
+        Assert.Equal(
+            $"Option '{option}' requires a non-empty path.",
+            _parser.Parse([$"{option}="]).ErrorMessage);
+        Assert.Equal(
+            $"Option '{option}' requires a non-empty path.",
+            _parser.Parse([option, " \t "]).ErrorMessage);
+        Assert.Equal(
+            $"Option '{option}' was specified more than once.",
+            _parser.Parse([option, "first.txt", $"{option}=second.txt"]).ErrorMessage);
     }
 
     [Theory]
@@ -57,6 +124,9 @@ public sealed class PluginTelemetryCommandLineParserTests
             "--timestamp", "timestamp",
             "--event-type", "event",
             "--session-id", "session",
+            "--allowed-skills", "skills.txt",
+            "--allowed-references", "references.txt",
+            "--allowed-tools", "tools.json",
             debugArgument
         ]);
 
@@ -74,6 +144,9 @@ public sealed class PluginTelemetryCommandLineParserTests
             "--timestamp", "timestamp",
             "--event-type", "event",
             "--session-id", "session",
+            "--allowed-skills", "skills.txt",
+            "--allowed-references", "references.txt",
+            "--allowed-tools", "tools.json",
             "--debug", value
         ]);
 
@@ -82,16 +155,29 @@ public sealed class PluginTelemetryCommandLineParserTests
     }
 
     [Theory]
-    [InlineData(new string[0], "Missing Required options: --timestamp, --event-type, --session-id")]
-    [InlineData(new[] { "--event-type", "event", "--session-id", "session" }, "Missing Required options: --timestamp")]
-    [InlineData(new[] { "--timestamp", "time", "--session-id", "session" }, "Missing Required options: --event-type")]
-    [InlineData(new[] { "--timestamp", "time", "--event-type", "event" }, "Missing Required options: --session-id")]
-    public void Parse_ReportsMissingRequiredOptions(string[] args, string expected)
+    [InlineData("--timestamp")]
+    [InlineData("--event-type")]
+    [InlineData("--session-id")]
+    [InlineData("--allowed-skills")]
+    [InlineData("--allowed-references")]
+    [InlineData("--allowed-tools")]
+    public void Parse_ReportsMissingRequiredOptions(string missing)
     {
+        var args = new[] { "--timestamp", "--event-type", "--session-id",
+            "--allowed-skills", "--allowed-references", "--allowed-tools" }
+            .Where(option => option != missing).SelectMany(option => new[] { option, "value" }).ToArray();
         var result = _parser.Parse(args);
 
         Assert.False(result.IsSuccess);
-        Assert.Equal(expected, result.ErrorMessage);
+        Assert.Equal($"Missing Required options: {missing}", result.ErrorMessage);
+    }
+
+    [Fact]
+    public void Parse_ReportsAllMissingRequiredOptions()
+    {
+        Assert.Equal(
+            "Missing Required options: --timestamp, --event-type, --session-id, --allowed-skills, --allowed-references, --allowed-tools",
+            _parser.Parse([]).ErrorMessage);
     }
 
     [Theory]

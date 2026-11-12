@@ -11,14 +11,18 @@ import {
 } from "./config.ts";
 import { runEvaluationBatch, type EvaluationBatch } from "./evaluation.ts";
 import { commandName, runProcess } from "./process.ts";
+import { collectSkillImprovementBilling, emptyBilling, type PhaseBilling, type BillingCategorySummary } from "./billing.ts";
 import {
   aggregateJudgments,
   buildFailurePacket,
   decideAcceptance,
+  decideRefinement,
+  summarizeTrials,
   writeReport,
   type AcceptanceDecision,
   type AggregatedTrial,
   type IterationReport,
+  type RefinementDecision,
   type SkillImprovementReport,
 } from "./report.ts";
 
@@ -205,13 +209,15 @@ async function runCandidateValidation(
   return errors;
 }
 
-async function runImprovementAgent(
+export async function runImprovementAgent(
   worktree: string,
   outputDirectory: string,
   spec: SkillImprovementRunSpec,
   failurePacketPath: string,
+  previousCandidatePatchPath: string | undefined,
   iteration: number,
   deadline: number,
+  onBilling: (billing: BillingCategorySummary) => void = () => {},
 ): Promise<void> {
   const skillDirectory = path.join(
     worktree,
@@ -228,12 +234,26 @@ async function runImprovementAgent(
     "Make a general improvement that addresses the failure pattern instead of copying prompt wording.",
     "Keep the skill concise and preserve its existing structure and conventions.",
     "Read .skill-improvement-failure-packet.md before making changes, but do not edit it.",
-  ].join("\n");
+    previousCandidatePatchPath
+      ? "Inspect .skill-improvement-previous-candidate.patch and selectively reapply useful discarded changes; do not blindly restore the whole patch."
+      : "",
+  ].filter(Boolean).join("\n");
   const localFailurePacketPath = path.join(
     skillDirectory,
     ".skill-improvement-failure-packet.md"
   );
+  const localPreviousCandidatePatchPath = path.join(
+    skillDirectory,
+    ".skill-improvement-previous-candidate.patch"
+  );
   fs.copyFileSync(failurePacketPath, localFailurePacketPath);
+  if (previousCandidatePatchPath) {
+    fs.copyFileSync(previousCandidatePatchPath, localPreviousCandidatePatchPath);
+  }
+  const usageFile = path.join(outputDirectory, `iteration-${iteration}-agent-usage.json`);
+  const eventFile = path.join(outputDirectory, `iteration-${iteration}-agent.jsonl`);
+  fs.rmSync(usageFile, { force: true });
+  fs.rmSync(eventFile, { force: true });
   const args = [
     "-p",
     prompt,
@@ -244,13 +264,13 @@ async function runImprovementAgent(
     "--allow-tool",
     "write",
     "--disable-builtin-mcps",
-    "--no-remote",
-    "--no-remote-export",
+    "--sync-session",
+    "off",
     "--no-ask-user",
     "--output-format",
     "json",
     "--usage-output-file",
-    path.join(outputDirectory, `iteration-${iteration}-agent-usage.json`),
+    usageFile,
     "-C",
     skillDirectory,
   ];
@@ -260,12 +280,36 @@ async function runImprovementAgent(
   try {
     await runProcess("copilot", args, {
       cwd: skillDirectory,
-      stdoutFile: path.join(outputDirectory, `iteration-${iteration}-agent.jsonl`),
+      stdoutFile: eventFile,
       stderrFile: path.join(outputDirectory, `iteration-${iteration}-agent.stderr.log`),
       timeoutMs: Math.max(deadline - Date.now(), 1),
     });
   } finally {
     fs.rmSync(localFailurePacketPath, { force: true });
+    fs.rmSync(localPreviousCandidatePatchPath, { force: true });
+    let billing: BillingCategorySummary;
+    try {
+      const events: unknown[] = fs.existsSync(eventFile)
+        ? fs.readFileSync(eventFile, "utf8").split(/\r?\n/).filter(Boolean).map(line => JSON.parse(line))
+        : [];
+      const results = events.filter((event): event is { type: "result"; exitCode?: unknown } =>
+        !!event && typeof event === "object" && "type" in event && event.type === "result"
+      );
+      const finalized = results.length === 1 && Number.isInteger(results[0].exitCode);
+      billing = collectSkillImprovementBilling(
+        fs.existsSync(usageFile) ? JSON.parse(fs.readFileSync(usageFile, "utf8")) : undefined,
+        finalized
+      );
+    } catch (error) {
+      billing = collectSkillImprovementBilling(undefined, false);
+      billing.reason = `Unable to read or validate CLI billing exports: ${
+        error instanceof Error ? error.message : String(error)
+      }`;
+    }
+    onBilling(billing);
+    if (billing.reason) {
+      console.warn(`Iteration ${iteration} agent AI credits unavailable: ${billing.reason}`);
+    }
   }
 }
 
@@ -313,6 +357,29 @@ export function writeCandidatePatch(
   return patchPath;
 }
 
+export function writeFinalCandidatePatch(
+  repoRoot: string,
+  outputDirectory: string,
+  baselineCommit: string,
+  candidateCommit: string,
+): string {
+  const patchPath = path.join(outputDirectory, "final-candidate.patch");
+  fs.writeFileSync(
+    patchPath,
+    execFileSync(
+      "git",
+      ["diff", "--binary", baselineCommit, candidateCommit],
+      {
+        cwd: repoRoot,
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "pipe"],
+      }
+    ),
+    "utf8"
+  );
+  return patchPath;
+}
+
 function copyCandidateSkill(
   worktree: string,
   iterationDirectory: string,
@@ -348,6 +415,39 @@ function enforceActualUsage(spec: SkillImprovementRunSpec, usage: Usage): void {
   }
 }
 
+export function hasActionableFailureEvidence(
+  trials: AggregatedTrial[],
+  minimumSkillInvocationRate: number | undefined,
+  maximumSkillTokenIncreasePercent: number,
+  gateEvidence: {
+    candidateSkillInvocationRate?: number;
+    skillMarkdownTokenIncreasePercent?: number;
+    hasValidationFailure?: boolean;
+  } = {},
+): boolean {
+  if (
+    gateEvidence.hasValidationFailure
+    || trials.some(trial => !trial.passed || trial.judgeDisagreement)
+  ) {
+    return true;
+  }
+  if (minimumSkillInvocationRate !== undefined) {
+    const currentInvocationRate = summarizeTrials(trials).skillInvocationRate;
+    if (
+      currentInvocationRate < minimumSkillInvocationRate
+      || (
+        gateEvidence.candidateSkillInvocationRate !== undefined
+        && gateEvidence.candidateSkillInvocationRate < minimumSkillInvocationRate
+      )
+    ) {
+      return true;
+    }
+  }
+  return gateEvidence.skillMarkdownTokenIncreasePercent !== undefined
+    && gateEvidence.skillMarkdownTokenIncreasePercent
+      > maximumSkillTokenIncreasePercent;
+}
+
 function writeFailurePacket(
   outputDirectory: string,
   iteration: number,
@@ -359,6 +459,37 @@ function writeFailurePacket(
   );
   fs.writeFileSync(failurePacketPath, contents, "utf8");
   return failurePacketPath;
+}
+
+export function decideHeldOutAcceptance(
+  spec: SkillImprovementRunSpec,
+  baselineTrials: AggregatedTrial[],
+  candidateTrials: AggregatedTrial[],
+  baselineSkillTokens: number,
+  candidateSkillTokens: number,
+): AcceptanceDecision {
+  if (!spec.heldOutAcceptance?.enabled) {
+    throw new Error("heldOutAcceptance must be enabled.");
+  }
+  const heldOutSpec: SkillImprovementRunSpec = {
+    ...spec,
+    acceptance: {
+      ...spec.acceptance,
+      minimumQualityImprovementPoints:
+        spec.heldOutAcceptance.minimumQualityImprovementPoints,
+      maximumEvalRegressionPoints:
+        spec.heldOutAcceptance.maximumEvalRegressionPoints,
+      maximumModelRegressionPoints:
+        spec.heldOutAcceptance.maximumModelRegressionPoints,
+    },
+  };
+  return decideAcceptance(
+    heldOutSpec,
+    baselineTrials,
+    candidateTrials,
+    baselineSkillTokens,
+    candidateSkillTokens
+  );
 }
 
 export async function executeSkillImprovement(
@@ -380,14 +511,32 @@ export async function executeSkillImprovement(
   const baselineWorktree = path.join(worktreeRoot, "baseline");
   const usage: Usage = { answerGenerations: 0, judgeCalls: 0 };
   const iterations: IterationReport[] = [];
+  const billing: PhaseBilling[] = [];
+  const recordBilling = (phase: string) => (evaluation: PhaseBilling) => {
+    const existing = billing.find(item => item.phase === phase);
+    if (existing) {
+      existing.evaluationAnswers = { ...evaluation.evaluationAnswers };
+      existing.finalized = evaluation.finalized;
+    } else {
+      billing.push({
+        ...evaluation, phase,
+        evaluationAnswers: { ...evaluation.evaluationAnswers },
+      });
+    }
+  };
   let baselineSkillTokens = 0;
   let baselineTrials: AggregatedTrial[] = [];
-  let bestTrials: AggregatedTrial[];
-  let bestCommit = baselineCommit;
+  let baselineComparableTrials: AggregatedTrial[];
+  let refinementTrials: AggregatedTrial[];
+  let refinementCommit = baselineCommit;
   let bestCandidateCommit: string | undefined;
   let previousDecision: AcceptanceDecision | undefined;
+  let previousRefinementDecision: RefinementDecision | undefined;
+  let previousRejectedPatchPath: string | undefined;
+  let previousValidationErrors: string[] = [];
   let finalPatchPath: string | undefined;
   let heldOut: SkillImprovementReport["heldOut"];
+  let terminationReason: SkillImprovementReport["terminationReason"];
   let report: SkillImprovementReport;
 
   try {
@@ -403,17 +552,35 @@ export async function executeSkillImprovement(
       path.join(outputDirectory, "baseline"),
       spec,
       "baseline",
-      spec.evaluations.development,
+      "development",
       spec.experiment.conditions,
-      deadline
+      deadline,
+      undefined,
+      recordBilling("Baseline")
     );
     addUsage(usage, baselineBatch);
     enforceActualUsage(spec, usage);
     baselineTrials = aggregateJudgments(baselineBatch.trials);
-    bestTrials = filterComparableTrials(baselineTrials);
+    baselineComparableTrials = filterComparableTrials(baselineTrials);
+    refinementTrials = baselineComparableTrials;
 
     if (spec.improvementAgent.enabled) {
       for (let iteration = 1; iteration <= spec.limits.maxIterations; iteration += 1) {
+        if (!hasActionableFailureEvidence(
+          refinementTrials,
+          spec.acceptance.minimumSkillInvocationRate,
+          spec.limits.maxSkillTokenIncreasePercent,
+          {
+            candidateSkillInvocationRate:
+              previousDecision?.comparison.candidate.skillInvocationRate,
+            skillMarkdownTokenIncreasePercent:
+              previousDecision?.skillMarkdownTokenIncreasePercent,
+            hasValidationFailure: previousValidationErrors.length > 0,
+          }
+        )) {
+          terminationReason = "no-actionable-failures";
+          break;
+        }
         const iterationDirectory = path.join(outputDirectory, `iteration-${iteration}`);
         fs.mkdirSync(iterationDirectory, { recursive: true });
         const worktree = path.join(worktreeRoot, `iteration-${iteration}`);
@@ -424,30 +591,47 @@ export async function executeSkillImprovement(
         };
         iterations.push(iterationReport);
         try {
-          await createWorktree(options.repoRoot, worktree, bestCommit);
-          const failurePacket = buildFailurePacket(spec, bestTrials, previousDecision);
+          await createWorktree(options.repoRoot, worktree, refinementCommit);
+          const failurePacket = buildFailurePacket(
+            spec,
+            refinementTrials,
+            previousDecision,
+            previousRefinementDecision,
+            previousValidationErrors
+          );
           const failurePacketPath = writeFailurePacket(
             outputDirectory,
             iteration,
             failurePacket
           );
           console.log(`Running improvement agent for iteration ${iteration}...`);
+          const iterationBilling: PhaseBilling = {
+            phase: `Iteration ${iteration}`,
+            finalized: false,
+            evaluationAnswers: emptyBilling("answer trajectories", 0, "not applicable"),
+            skillImprovement: emptyBilling("agent invocations", 1, "copilot_cli.usage_output.totalNanoAiu"),
+          };
+          billing.push(iterationBilling);
           await runImprovementAgent(
             worktree,
             outputDirectory,
             spec,
             failurePacketPath,
+            previousRejectedPatchPath,
             iteration,
-            deadline
+            deadline,
+            skillImprovementBilling => { iterationBilling.skillImprovement = skillImprovementBilling; }
           );
+          iterationBilling.finalized = true;
           iterationReport.changedFiles = changedFiles(worktree);
           iterationReport.validationErrors.push(
             ...validateChangedPaths(iterationReport.changedFiles, spec)
           );
+          let candidatePatchPath: string | undefined;
           if (iterationReport.changedFiles.length === 0) {
             iterationReport.validationErrors.push("Improvement agent made no file changes.");
           } else {
-            const candidatePatchPath = writeCandidatePatch(
+            candidatePatchPath = writeCandidatePatch(
               worktree,
               iterationDirectory
             );
@@ -471,9 +655,13 @@ export async function executeSkillImprovement(
             );
           }
           if (iterationReport.validationErrors.length > 0) {
+            previousValidationErrors = [...iterationReport.validationErrors];
             previousDecision = undefined;
+            previousRefinementDecision = undefined;
+            previousRejectedPatchPath = candidatePatchPath;
             continue;
           }
+          previousValidationErrors = [];
 
           const candidateCommit = commitCandidate(worktree, iteration);
           iterationReport.candidateCommit = candidateCommit;
@@ -487,10 +675,11 @@ export async function executeSkillImprovement(
             iterationDirectory,
             spec,
             "candidate",
-            spec.evaluations.development,
+            "development",
             candidateConditions,
             deadline,
-            iteration
+            iteration,
+            recordBilling(`Iteration ${iteration}`)
           );
           addUsage(usage, candidateBatch);
           enforceActualUsage(spec, usage);
@@ -499,17 +688,31 @@ export async function executeSkillImprovement(
           const candidateSkillTokens = estimateSkillTokens(worktree, spec);
           const decision = decideAcceptance(
             spec,
-            bestTrials,
+            baselineComparableTrials,
+            candidateTrials,
+            baselineSkillTokens,
+            candidateSkillTokens
+          );
+          const refinementDecision = decideRefinement(
+            spec,
+            refinementTrials,
             candidateTrials,
             baselineSkillTokens,
             candidateSkillTokens
           );
           iterationReport.decision = decision;
+          iterationReport.refinementDecision = refinementDecision;
           previousDecision = decision;
+          previousRefinementDecision = refinementDecision;
           if (decision.accepted) {
-            bestCommit = candidateCommit;
             bestCandidateCommit = candidateCommit;
-            bestTrials = candidateTrials;
+          }
+          if (decision.accepted || refinementDecision.retained) {
+            refinementCommit = candidateCommit;
+            refinementTrials = candidateTrials;
+            previousRejectedPatchPath = undefined;
+          } else {
+            previousRejectedPatchPath = candidatePatchPath;
           }
         } finally {
           await removeWorktree(options.repoRoot, worktree);
@@ -520,12 +723,12 @@ export async function executeSkillImprovement(
     let finalAccepted = Boolean(bestCandidateCommit);
     if (
       finalAccepted
-      && spec.acceptance.requireHeldOutImprovement
-      && (spec.evaluations.heldOut?.length ?? 0) > 0
+      && spec.heldOutAcceptance?.enabled
+      && plan.heldOutPromptCount > 0
     ) {
       const finalWorktree = path.join(worktreeRoot, "final-candidate");
       try {
-        await createWorktree(options.repoRoot, finalWorktree, bestCommit);
+        await createWorktree(options.repoRoot, finalWorktree, bestCandidateCommit!);
         await buildWorktree(finalWorktree, deadline);
         const conditions = spec.experiment.conditions.filter(
           condition => condition.skill === "enabled"
@@ -536,9 +739,11 @@ export async function executeSkillImprovement(
           path.join(outputDirectory, "held-out", "baseline"),
           spec,
           "held-out-baseline",
-          spec.evaluations.heldOut!,
+          "heldOut",
           conditions,
-          deadline
+          deadline,
+          undefined,
+          recordBilling("Held-out baseline")
         );
         const candidateHeldOut = await runEvaluationBatch(
           finalWorktree,
@@ -546,14 +751,16 @@ export async function executeSkillImprovement(
           path.join(outputDirectory, "held-out", "candidate"),
           spec,
           "held-out-candidate",
-          spec.evaluations.heldOut!,
+          "heldOut",
           conditions,
-          deadline
+          deadline,
+          undefined,
+          recordBilling("Held-out candidate")
         );
         addUsage(usage, baselineHeldOut);
         addUsage(usage, candidateHeldOut);
         enforceActualUsage(spec, usage);
-        const heldOutDecision = decideAcceptance(
+        const heldOutDecision = decideHeldOutAcceptance(
           spec,
           aggregateJudgments(baselineHeldOut.trials),
           aggregateJudgments(candidateHeldOut.trials),
@@ -581,10 +788,11 @@ export async function executeSkillImprovement(
 
     if (finalAccepted && bestCandidateCommit) {
       finalPatchPath = "final-candidate.patch";
-      fs.writeFileSync(
-        path.join(outputDirectory, finalPatchPath),
-        git(options.repoRoot, ["diff", "--binary", baselineCommit, bestCandidateCommit]),
-        "utf8"
+      writeFinalCandidatePatch(
+        options.repoRoot,
+        outputDirectory,
+        baselineCommit,
+        bestCandidateCommit
       );
     }
 
@@ -599,9 +807,11 @@ export async function executeSkillImprovement(
       baselineTrials,
       iterations,
       heldOut,
+      terminationReason,
       bestCandidateCommit,
       finalAccepted,
       finalPatchPath,
+      billing,
       usage: {
         ...usage,
         durationMinutes: (Date.now() - startedAt) / 60_000,
@@ -622,8 +832,10 @@ export async function executeSkillImprovement(
       baselineTrials,
       iterations,
       heldOut,
+      terminationReason,
       bestCandidateCommit,
       finalAccepted: false,
+      billing,
       usage: {
         ...usage,
         durationMinutes: (Date.now() - startedAt) / 60_000,

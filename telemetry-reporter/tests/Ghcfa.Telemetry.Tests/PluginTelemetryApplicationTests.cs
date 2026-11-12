@@ -11,8 +11,12 @@ namespace Ghcfa.Telemetry.Tests;
 /// <summary>
 /// Contains tests for the telemetry reporting application.
 /// </summary>
-public sealed class PluginTelemetryApplicationTests
+public sealed class PluginTelemetryApplicationTests : IDisposable
 {
+    private readonly TemporaryAllowlists _files = new();
+
+    public void Dispose() => _files.Dispose();
+
     private readonly IPluginTelemetryPublisher _publisher =
         Substitute.For<IPluginTelemetryPublisher>();
 
@@ -27,6 +31,7 @@ public sealed class PluginTelemetryApplicationTests
             "--timestamp", "timestamp",
             "--event-type", "event",
             "--session-id", "session",
+            .. _files.Arguments,
             "--tool-name", "azure-storage"
         ],
         output,
@@ -57,7 +62,7 @@ public sealed class PluginTelemetryApplicationTests
         using var response = JsonDocument.Parse(output.ToString());
         Assert.Equal(400, response.RootElement.GetProperty("status").GetInt32());
         Assert.Equal(
-            "Missing Required options: --timestamp, --session-id",
+            "Missing Required options: --timestamp, --session-id, --allowed-skills, --allowed-references, --allowed-tools",
             response.RootElement.GetProperty("message").GetString());
         await _publisher.DidNotReceiveWithAnyArgs().PublishAsync(
             default!,
@@ -75,6 +80,7 @@ public sealed class PluginTelemetryApplicationTests
             "--timestamp", "timestamp",
             "--event-type", "event",
             "--session-id", "session",
+            .. _files.Arguments,
             "--skill-name", "custom-skill"
         ],
         output,
@@ -101,7 +107,8 @@ public sealed class PluginTelemetryApplicationTests
         [
             "--timestamp", "timestamp",
             "--event-type", "event",
-            "--session-id", "session"
+            "--session-id", "session",
+            .. _files.Arguments
         ],
         output,
         TestContext.Current.CancellationToken);
@@ -130,9 +137,251 @@ public sealed class PluginTelemetryApplicationTests
             TestContext.Current.CancellationToken);
     }
 
+    [Fact]
+    public async Task RunAsync_PublishesUsingAllConfiguredFiles()
+    {
+        using var skills = new TemporaryAllowlistFile("custom-skill");
+        using var references = new TemporaryAllowlistFile("custom-skill/references/new.md");
+        using var tools = new TemporaryAllowlistFile("""
+            {"commands":{"Initial":["custom_tool"]},"areas":{},"extensionTools":{}}
+            """);
+
+        var result = await ExecuteAsync(CreateApplication(),
+            "--allowed-skills", skills.Path,
+            "--allowed-references", references.Path,
+            "--allowed-tools", tools.Path,
+            "--skill-name", "custom-skill",
+            "--file-reference", "custom-skill/references/new.md",
+            "--tool-name", "azure-custom_tool");
+
+        Assert.Equal(0, result.ExitCode);
+        using var response = JsonDocument.Parse(result.Output);
+        Assert.Equal(200, response.RootElement.GetProperty("status").GetInt32());
+        await _publisher.Received(1).PublishAsync(
+            Arg.Is<PluginTelemetryOptions>(options =>
+                options.SkillName == "custom-skill" &&
+                options.FileReference == "custom-skill/references/new.md" &&
+                options.ToolName == "custom_tool"),
+            Arg.Any<CancellationToken>());
+    }
+
+    [Theory]
+    [InlineData("custom/references/new.md", "custom\\references\\new.md")]
+    [InlineData("custom\\references\\new.md", "custom/references/new.md")]
+    [InlineData("custom/references/new.md", "custom/references/new.md")]
+    [InlineData("custom\\references\\new.md", "custom\\references\\new.md")]
+    [InlineData("custom\\references/new.md", "custom/references\\new.md")]
+    public async Task RunAsync_NormalizesReferenceMatchingWithoutChangingTelemetry(string entry, string reportedPath)
+    {
+        using var file = new TemporaryAllowlistFile(entry);
+
+        var result = await ExecuteAsync(CreateApplication(),
+            "--allowed-references", file.Path, "--file-reference", reportedPath);
+
+        Assert.Equal(0, result.ExitCode);
+        using var response = JsonDocument.Parse(result.Output);
+        Assert.Equal(200, response.RootElement.GetProperty("status").GetInt32());
+        await _publisher.Received(1).PublishAsync(
+            Arg.Is<PluginTelemetryOptions>(options => options.FileReference == reportedPath),
+            Arg.Any<CancellationToken>());
+    }
+
+    [Theory]
+    [InlineData("--allowed-skills", "missing")]
+    [InlineData("--allowed-references", "missing")]
+    [InlineData("--allowed-tools", "missing")]
+    [InlineData("--allowed-skills", "directory")]
+    [InlineData("--allowed-references", "directory")]
+    [InlineData("--allowed-tools", "directory")]
+    [InlineData("--allowed-skills", "invalid")]
+    [InlineData("--allowed-references", "invalid")]
+    [InlineData("--allowed-tools", "invalid")]
+    public async Task RunAsync_FailsClosedForInvalidFilesEvenWithoutEventValues(string option, string failure)
+    {
+        using var file = new TemporaryAllowlistFile("custom-entry");
+        var path = failure switch
+        {
+            "missing" => file.Path + ".missing",
+            "directory" => Path.GetDirectoryName(file.Path)!,
+            _ => file.Path + '\0'
+        };
+
+        var result = await ExecuteAsync(CreateApplication(), option, path);
+
+        Assert.Equal(1, result.ExitCode);
+        using var response = JsonDocument.Parse(result.Output);
+        Assert.Equal(400, response.RootElement.GetProperty("status").GetInt32());
+        Assert.Contains("Unable to read allowlist file", response.RootElement.GetProperty("message").GetString());
+        Assert.False(response.RootElement.TryGetProperty("results", out _));
+        await _publisher.DidNotReceiveWithAnyArgs().PublishAsync(default!, TestContext.Current.CancellationToken);
+    }
+
+    [Fact]
+    public async Task RunAsync_FailsClosedForLockedFile()
+    {
+        using var file = new TemporaryAllowlistFile("custom-entry");
+        using var locked = File.Open(file.Path, FileMode.Open, FileAccess.ReadWrite, FileShare.None);
+
+        var result = await ExecuteAsync(CreateApplication(), "--allowed-skills", file.Path);
+
+        Assert.Equal(1, result.ExitCode);
+        using var response = JsonDocument.Parse(result.Output);
+        Assert.Equal(400, response.RootElement.GetProperty("status").GetInt32());
+        await _publisher.DidNotReceiveWithAnyArgs().PublishAsync(default!, TestContext.Current.CancellationToken);
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("custom_tool")]
+    [InlineData("{}")]
+    [InlineData("[]")]
+    [InlineData("null")]
+    [InlineData("""{"commands":{},"areas":{}}""")]
+    [InlineData("""{"commands":{},"extensionTools":{}}""")]
+    [InlineData("""{"areas":{},"extensionTools":{}}""")]
+    [InlineData("""{"commands":[],"areas":{},"extensionTools":{}}""")]
+    [InlineData("""{"commands":{},"areas":null,"extensionTools":{}}""")]
+    [InlineData("""{"commands":{},"areas":{},"extensionTools":[]}""")]
+    [InlineData("""{"commands":{"Initial":[]},"areas":{},"extensionTools":{}}""")]
+    [InlineData("""{"commands":{},"areas":{"Initial":"storage"},"extensionTools":{}}""")]
+    [InlineData("""{"commands":{},"areas":{},"extensionTools":{"Initial":[null]}}""")]
+    [InlineData("""{"commands":{"Initial":[1]},"areas":{},"extensionTools":{}}""")]
+    [InlineData("""{"commands":{"Initial":[""]},"areas":{},"extensionTools":{}}""")]
+    [InlineData("""{"commands":{"Initial":[" "]},"areas":{},"extensionTools":{}}""")]
+    [InlineData("""{"commands":{},"areas":{},"extensionTools":{},"tools":{}}""")]
+    [InlineData("""{"commands":{},"commands":{},"areas":{},"extensionTools":{}}""")]
+    public async Task RunAsync_FailsClosedForMalformedToolJson(string contents)
+    {
+        using var file = new TemporaryAllowlistFile(contents);
+
+        var result = await ExecuteAsync(CreateApplication(),
+            "--allowed-tools", file.Path, "--tool-name", "azure-storage");
+
+        Assert.Equal(1, result.ExitCode);
+        using var response = JsonDocument.Parse(result.Output);
+        Assert.Equal(400, response.RootElement.GetProperty("status").GetInt32());
+        var message = response.RootElement.GetProperty("message").GetString();
+        Assert.Contains("Unable to read allowlist file", message);
+        Assert.Contains(file.Path, message);
+        Assert.False(response.RootElement.TryGetProperty("results", out _));
+        await _publisher.DidNotReceiveWithAnyArgs().PublishAsync(default!, TestContext.Current.CancellationToken);
+    }
+
+    [Fact]
+    public async Task RunAsync_DoesNotRetainToolsBetweenInvocations()
+    {
+        using var file = new TemporaryAllowlistFile("""
+            {"commands":{"1.0.1":["custom_tool"]},"areas":{},"extensionTools":{}}
+            """);
+        var application = CreateApplication();
+
+        var custom = await ExecuteAsync(application,
+            "--allowed-tools", file.Path, "--tool-name", "azure-custom_tool");
+        var otherFiles = await ExecuteAsync(application, "--tool-name", "azure-storage");
+        var rejected = await ExecuteAsync(application, "--tool-name", "azure-custom_tool");
+
+        Assert.Equal(0, custom.ExitCode);
+        Assert.Equal(0, otherFiles.ExitCode);
+        Assert.Equal(1, rejected.ExitCode);
+        using var response = JsonDocument.Parse(rejected.Output);
+        Assert.Equal(403, response.RootElement.GetProperty("status").GetInt32());
+        await _publisher.Received(2).PublishAsync(
+            Arg.Any<PluginTelemetryOptions>(), Arg.Any<CancellationToken>());
+    }
+
+    [Theory]
+    [InlineData("--allowed-skills", "--skill-name", "azure-storage")]
+    [InlineData("--allowed-references", "--file-reference", "azure-ai\\references\\auth-best-practices.md")]
+    [InlineData("--allowed-tools", "--tool-name", "azure-storage")]
+    public async Task RunAsync_EmptyFileRejectsFormerBuiltInValues(string option, string eventOption, string value)
+    {
+        using var file = new TemporaryAllowlistFile(option == "--allowed-tools"
+            ? """{"commands":{},"areas":{},"extensionTools":{}}"""
+            : "");
+
+        var result = await ExecuteAsync(CreateApplication(), option, file.Path, eventOption, value);
+
+        Assert.Equal(1, result.ExitCode);
+        using var response = JsonDocument.Parse(result.Output);
+        Assert.Equal(403, response.RootElement.GetProperty("status").GetInt32());
+        await _publisher.DidNotReceiveWithAnyArgs().PublishAsync(default!, TestContext.Current.CancellationToken);
+    }
+
+    [Fact]
+    public async Task RunAsync_RereadsFilesBetweenInvocations()
+    {
+        using var file = new TemporaryAllowlistFile("custom-skill");
+        var application = CreateApplication();
+
+        var custom = await ExecuteAsync(application,
+            "--allowed-skills", file.Path, "--skill-name", "custom-skill");
+        File.WriteAllText(file.Path, "changed-skill");
+        var changed = await ExecuteAsync(application,
+            "--allowed-skills", file.Path, "--skill-name", "changed-skill");
+        var rejected = await ExecuteAsync(application,
+            "--allowed-skills", file.Path, "--skill-name", "custom-skill");
+
+        Assert.Equal(0, custom.ExitCode);
+        Assert.Equal(0, changed.ExitCode);
+        Assert.Equal(1, rejected.ExitCode);
+        using var response = JsonDocument.Parse(rejected.Output);
+        Assert.Equal(403, response.RootElement.GetProperty("status").GetInt32());
+        await _publisher.Received(2).PublishAsync(
+            Arg.Any<PluginTelemetryOptions>(), Arg.Any<CancellationToken>());
+    }
+
+    [Theory]
+    [InlineData("--allowed-skills")]
+    [InlineData("--allowed-references")]
+    [InlineData("--allowed-tools")]
+    public async Task RunAsync_MissingAllowlistOptionDoesNotPublish(string missing)
+    {
+        using var output = new StringWriter();
+        var paths = _files.Arguments.Chunk(2).Where(pair => pair[0] != missing).SelectMany(pair => pair);
+
+        var exitCode = await CreateApplication().RunAsync(
+            ["--timestamp", "timestamp", "--event-type", "event", "--session-id", "session", .. paths],
+            output, TestContext.Current.CancellationToken);
+
+        Assert.Equal(1, exitCode);
+        using var response = JsonDocument.Parse(output.ToString());
+        Assert.Equal(400, response.RootElement.GetProperty("status").GetInt32());
+        Assert.Equal($"Missing Required options: {missing}", response.RootElement.GetProperty("message").GetString());
+        await _publisher.DidNotReceiveWithAnyArgs().PublishAsync(default!, TestContext.Current.CancellationToken);
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("# No entries\n \t")]
+    public async Task RunAsync_EmptyAllowlistsAcceptEventWithoutOptionalValues(string contents)
+    {
+        using var file = new TemporaryAllowlistFile(contents);
+        using var tools = new TemporaryAllowlistFile("""{"commands":{},"areas":{},"extensionTools":{}}""");
+
+        var result = await ExecuteAsync(CreateApplication(),
+            "--allowed-skills", file.Path, "--allowed-references", file.Path, "--allowed-tools", tools.Path);
+
+        Assert.Equal(0, result.ExitCode);
+        await _publisher.Received(1).PublishAsync(Arg.Any<PluginTelemetryOptions>(), Arg.Any<CancellationToken>());
+    }
+
+    private async Task<(int ExitCode, string Output)> ExecuteAsync(
+        PluginTelemetryApplication application, params string[] additionalArgs)
+    {
+        using var output = new StringWriter();
+        var defaultPaths = _files.Arguments.Chunk(2)
+            .Where(pair => !additionalArgs.Contains(pair[0])).SelectMany(pair => pair);
+        var exitCode = await application.RunAsync(
+            ["--timestamp", "timestamp", "--event-type", "event", "--session-id", "session",
+                .. defaultPaths, .. additionalArgs],
+            output,
+            TestContext.Current.CancellationToken);
+        return (exitCode, output.ToString());
+    }
+
     private PluginTelemetryApplication CreateApplication() =>
         new(
             new PluginTelemetryCommandLineParser(),
-            new PluginTelemetryValidator(PluginTelemetryAllowlist.LoadEmbedded()),
+            new PluginTelemetryValidator(),
             _publisher);
 }

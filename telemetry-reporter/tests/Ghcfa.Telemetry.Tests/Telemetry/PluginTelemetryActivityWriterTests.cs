@@ -33,7 +33,10 @@ public sealed class PluginTelemetryActivityWriterTests
             SkillName = "azure-storage",
             SkillVersion = "2.0.0",
             ToolName = "storage",
-            FileReference = "azure-ai\\references\\auth-best-practices.md"
+            FileReference = "azure-ai\\references\\auth-best-practices.md",
+            AllowedSkills = "local-skills.txt",
+            AllowedReferences = "local-references.txt",
+            AllowedTools = "local-tools.json"
         };
 
         using var activity = writer.Write(options);
@@ -54,8 +57,8 @@ public sealed class PluginTelemetryActivityWriterTests
         Assert.Equal(
             "azure-ai\\references\\auth-best-practices.md",
             activity.GetTagItem("Plugin_FileReference"));
-        Assert.Equal(CompatibilityConstants.AzureMcpServerName, activity.GetTagItem("McpServerNameV2"));
-        Assert.Equal(CompatibilityConstants.AzureMcpVersion, activity.GetTagItem("Version"));
+        Assert.Equal("ghcfa-telem", activity.GetTagItem("McpServerNameV2"));
+        Assert.Equal(TelemetryConstants.ProductVersion, activity.GetTagItem("Version"));
         Assert.Equal("namespace", activity.GetTagItem("ServerMode"));
         Assert.Equal("stdio", activity.GetTagItem("Transport"));
         Assert.Equal("AzurePublicCloud", activity.GetTagItem("Cloud"));
@@ -64,6 +67,9 @@ public sealed class PluginTelemetryActivityWriterTests
         Assert.NotNull(activity.GetTagItem("EventId"));
         Assert.NotNull(activity.GetTagItem("Host"));
         Assert.NotNull(activity.GetTagItem("ProcessorArchitecture"));
+        Assert.DoesNotContain(activity.TagObjects, tag =>
+            tag.Key.Contains("Allowed", StringComparison.OrdinalIgnoreCase) ||
+            tag.Value is string value && value.StartsWith("local-", StringComparison.Ordinal));
     }
 
     [Fact]
@@ -81,7 +87,10 @@ public sealed class PluginTelemetryActivityWriterTests
         {
             Timestamp = "timestamp",
             EventType = "event",
-            SessionId = "session"
+            SessionId = "session",
+            AllowedSkills = "skills.txt",
+            AllowedReferences = "references.txt",
+            AllowedTools = "tools.json"
         });
 
         Assert.NotNull(activity);
@@ -104,7 +113,10 @@ public sealed class PluginTelemetryActivityWriterTests
         {
             Timestamp = "timestamp",
             EventType = "event",
-            SessionId = "session"
+            SessionId = "session",
+            AllowedSkills = "skills.txt",
+            AllowedReferences = "references.txt",
+            AllowedTools = "tools.json"
         }));
     }
 

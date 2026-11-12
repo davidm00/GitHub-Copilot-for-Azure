@@ -4,13 +4,53 @@ import * as nbgv from "nerdbank-gitversioning";
 import * as path from "path";
 import log from "fancy-log";
 import { execSync } from "child_process";
-import { mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync, cpSync } from "fs";
+import {
+  chmodSync,
+  copyFileSync,
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "fs";
+import { isDeepStrictEqual } from "util";
 import Vinyl = require("vinyl");
+
+const { writePluginAllowlists }: typeof import("./scripts/src/plugin-allowlists.cjs") =
+  require("./scripts/src/plugin-allowlists.cts");
 
 // Matches top-level skill files like skills/azure-deploy/SKILL.md but not nested ones.
 const TOP_LEVEL_SKILL_RE = /^skills[\\/][^\\/]+[\\/]SKILL\.md$/;
-// Matches plugin.json in the .plugin/, .cursor-plugin/, and .claude-plugin/ directories.
-const PLUGIN_JSON_RE = /^\.(?:plugin|cursor-plugin|claude-plugin)[\\/]plugin\.json$/;
+// Matches the portable manifest and retained client-specific manifests.
+const PLUGIN_JSON_RE = /^(?:\.(?:plugin|cursor-plugin|claude-plugin)[\\/])?plugin\.json$/;
+const HOOK_MANIFESTS = [
+  "claude-hooks.json",
+  "copilot-hooks.json",
+  "cursor-hooks.json",
+] as const;
+const REQUIRED_PLUGIN_HOOK_FILES = [
+  "scripts/pluginPathAllowPattern.ps1",
+  "scripts/pluginPathAllowPattern.sh",
+] as const;
+const PLUGIN_METADATA_CLIENTS = [
+  { clientName: "agent-plugins", manifestDirectory: ".", hookManifest: null },
+  { clientName: "copilot", manifestDirectory: ".plugin", hookManifest: "copilot-hooks.json" },
+  { clientName: "cursor", manifestDirectory: ".cursor-plugin", hookManifest: "cursor-hooks.json" },
+  { clientName: "claude-code", manifestDirectory: ".claude-plugin", hookManifest: "claude-hooks.json" },
+] as const;
+
+type HookManifest = {
+  hooks: Record<string, unknown[]>;
+  [key: string]: unknown;
+};
+
+type HookAssemblyOptions = {
+  repositoryRoot?: string;
+  outputRoot?: string;
+};
 
 /**
  * Stamps each top-level skill's SKILL.md with a per-skill NBGV version.
@@ -58,7 +98,7 @@ function stampSkillVersions(plugin: string) {
 }
 
 /**
- * Stamps the plugin.json files in `.plugin/`, `.cursor-plugin/`, and
+ * Stamps the root plugin.json and files in `.plugin/`, `.cursor-plugin/`, and
  * `.claude-plugin/` with using git commit height.
  */
 function stampPluginVersions(plugin: string, legacyChangelog?: LegacyChangelog) {
@@ -120,13 +160,369 @@ function getPluginDirnames(): string[] {
 }
 
 function getPluginVersionedPaths(plugin: string): string[] {
-  return [`plugins/${plugin}`, "hooks"];
+  return [`plugins/${plugin}`, "hooks", "plugins/allowed-azure-tools.json"];
 }
 
-function copyHookScript(pluginDirname: string) {
-  const src = path.join(__dirname, "hooks");
-  const dst = path.join(__dirname, `output/${pluginDirname}/hooks`);
-  cpSync(src, dst, { recursive: true });
+function collectHookFiles(root: string): Map<string, string> {
+  const files = new Map<string, string>();
+  if (!existsSync(root)) {
+    return files;
+  }
+
+  const resolvedRoot = path.resolve(root);
+
+  function visit(directory: string): void {
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      const sourcePath = path.join(directory, entry.name);
+      const relativePath = path.relative(resolvedRoot, sourcePath);
+
+      if (
+        relativePath.startsWith(`..${path.sep}`) ||
+        relativePath === ".." ||
+        path.isAbsolute(relativePath)
+      ) {
+        throw new Error(`Hook source path is outside its root: ${sourcePath}`);
+      }
+      if (entry.isSymbolicLink() || lstatSync(sourcePath).isSymbolicLink()) {
+        throw new Error(`Hook source symlinks are not supported: ${sourcePath}`);
+      }
+      if (entry.isDirectory()) {
+        visit(sourcePath);
+      } else if (entry.isFile()) {
+        files.set(relativePath.split(path.sep).join("/"), sourcePath);
+      }
+    }
+  }
+
+  visit(resolvedRoot);
+  return files;
+}
+
+function parseHookManifest(filePath: string, sourceDescription: string): HookManifest {
+  let value: unknown;
+  try {
+    value = JSON.parse(readFileSync(filePath, "utf8"));
+  } catch (error) {
+    throw new Error(
+      `Invalid JSON in ${sourceDescription}: ${error instanceof Error ? error.message : String(error)}`
+    );
+  }
+
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new Error(`${sourceDescription} must contain a JSON object.`);
+  }
+
+  const manifest = value as Record<string, unknown>;
+  const hooks = manifest.hooks;
+  if (typeof hooks !== "object" || hooks === null || Array.isArray(hooks)) {
+    throw new Error(`${sourceDescription} must contain a "hooks" object.`);
+  }
+
+  for (const [eventName, registrations] of Object.entries(hooks)) {
+    if (!Array.isArray(registrations)) {
+      throw new Error(
+        `${sourceDescription} hook event "${eventName}" must contain an array.`
+      );
+    }
+  }
+
+  return manifest as HookManifest;
+}
+
+function mergeHookManifests(
+  shared: HookManifest,
+  fragment: HookManifest,
+  fragmentDescription: string,
+): HookManifest {
+  for (const [key, value] of Object.entries(fragment)) {
+    if (key === "hooks") {
+      continue;
+    }
+    if (!(key in shared)) {
+      throw new Error(
+        `${fragmentDescription} contains unsupported top-level field "${key}".`
+      );
+    }
+    if (!isDeepStrictEqual(value, shared[key])) {
+      throw new Error(
+        `${fragmentDescription} conflicts with shared top-level field "${key}".`
+      );
+    }
+  }
+
+  const hooks: Record<string, unknown[]> = {};
+  for (const [eventName, registrations] of Object.entries(shared.hooks)) {
+    hooks[eventName] = [...registrations];
+  }
+  for (const [eventName, registrations] of Object.entries(fragment.hooks)) {
+    hooks[eventName] = hooks[eventName]
+      ? [...hooks[eventName], ...registrations]
+      : [...registrations];
+  }
+
+  return { ...shared, hooks };
+}
+
+function copyHookFile(sourcePath: string, destinationPath: string): void {
+  mkdirSync(path.dirname(destinationPath), { recursive: true });
+  copyFileSync(sourcePath, destinationPath);
+  chmodSync(destinationPath, statSync(sourcePath).mode);
+}
+
+function readJsonObject(filePath: string, description: string): Record<string, unknown> {
+  let value: unknown;
+  try {
+    value = JSON.parse(readFileSync(filePath, "utf8"));
+  } catch (error) {
+    throw new Error(
+      `Invalid JSON in ${description}: ${error instanceof Error ? error.message : String(error)}`
+    );
+  }
+
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new Error(`${description} must contain a JSON object.`);
+  }
+
+  return value as Record<string, unknown>;
+}
+
+function requireMetadataString(
+  value: unknown,
+  fieldName: string,
+  description: string
+): string {
+  if (
+    typeof value !== "string" ||
+    value.length === 0 ||
+    /[\u0000-\u001f\u007f]/.test(value)
+  ) {
+    throw new Error(
+      `${description} field "${fieldName}" must contain a non-empty string without control characters.`
+    );
+  }
+  return value;
+}
+
+function readMcpServers(filePath: string): Record<string, unknown> {
+  if (!existsSync(filePath)) {
+    return {};
+  }
+  const description = `built MCP configuration ${filePath}`;
+  const config = readJsonObject(filePath, description);
+  if (
+    typeof config.mcpServers !== "object" ||
+    config.mcpServers === null ||
+    Array.isArray(config.mcpServers)
+  ) {
+    throw new Error(`${description} field "mcpServers" must contain a JSON object.`);
+  }
+  return config.mcpServers as Record<string, unknown>;
+}
+
+function normalizeLegacyMcpServers(
+  servers: Record<string, unknown>,
+): Record<string, unknown> {
+  return Object.fromEntries(Object.entries(servers).map(([name, value]) => {
+    if (typeof value !== "object" || value === null || Array.isArray(value)) {
+      throw new Error(`Legacy MCP server "${name}" must contain a JSON object.`);
+    }
+    const server = value as Record<string, unknown>;
+    const type = server.type === "http"
+      ? "streamable-http"
+      : server.type ?? ("command" in server ? "stdio" : undefined);
+    return [name, { ...server, type }];
+  }));
+}
+
+function writePluginHookMetadata(
+  pluginDirname: string,
+  outputRoot: string,
+  destinationRoot: string
+): void {
+  const pluginOutputRoot = path.join(outputRoot, pluginDirname);
+  let pluginName: string | undefined;
+  let pluginVersion: string | undefined;
+  let portableManifest: Record<string, unknown> | undefined;
+
+  for (const client of PLUGIN_METADATA_CLIENTS) {
+    const manifestPath = path.join(
+      pluginOutputRoot,
+      client.manifestDirectory,
+      "plugin.json"
+    );
+    if (!existsSync(manifestPath)) {
+      throw new Error(
+        `Missing built plugin manifest output/${pluginDirname}/${client.manifestDirectory}/plugin.json.`
+      );
+    }
+
+    const description =
+      `built plugin manifest output/${pluginDirname}/${client.manifestDirectory}/plugin.json`;
+    const manifest = readJsonObject(manifestPath, description);
+    const clientPluginName = requireMetadataString(manifest.name, "name", description);
+    const clientPluginVersion = requireMetadataString(
+      manifest.version,
+      "version",
+      description
+    );
+
+    pluginName ??= clientPluginName;
+    pluginVersion ??= clientPluginVersion;
+    if (clientPluginName !== pluginName || clientPluginVersion !== pluginVersion) {
+      throw new Error(
+        `Built plugin manifests for ${pluginDirname} must use the same name and version; ` +
+        `${client.clientName} has "${clientPluginName}" version "${clientPluginVersion}", ` +
+        `expected "${pluginName}" version "${pluginVersion}".`
+      );
+    }
+
+    portableManifest ??= manifest;
+    if (client.hookManifest !== null) {
+      const expectedFields: Record<string, unknown> = {
+        author: portableManifest.author,
+        homepage: portableManifest.homepage,
+        repository: portableManifest.repository,
+        license: portableManifest.license,
+        keywords: portableManifest.keywords,
+        skills: "./skills/",
+        mcpServers: "./.mcp.json",
+        hooks: `./hooks/${client.hookManifest}`,
+      };
+      // Claude and Cursor descriptions intentionally include their client names.
+      if (client.clientName === "copilot") {
+        expectedFields.description = portableManifest.description;
+      }
+
+      for (const [field, expected] of Object.entries(expectedFields)) {
+        if (!isDeepStrictEqual(manifest[field], expected)) {
+          throw new Error(
+            `${description} field "${field}" is out of sync: ` +
+            `expected ${JSON.stringify(expected) ?? "a missing field"}, ` +
+            `found ${JSON.stringify(manifest[field]) ?? "a missing field"}.`
+          );
+        }
+      }
+    }
+  }
+
+  if (!pluginName || !pluginVersion) {
+    throw new Error(`No built plugin manifests were found for ${pluginDirname}.`);
+  }
+
+  const portableMcpServers = readMcpServers(path.join(pluginOutputRoot, "mcp.json"));
+  const legacyMcpServers = readMcpServers(path.join(pluginOutputRoot, ".mcp.json"));
+  if (!isDeepStrictEqual(portableMcpServers, normalizeLegacyMcpServers(legacyMcpServers))) {
+    throw new Error(
+      `Built MCP configurations for ${pluginDirname} must declare equivalent servers in mcp.json and .mcp.json.`
+    );
+  }
+  const mcpServerNames = Object.keys(portableMcpServers).sort();
+  for (const serverName of mcpServerNames) {
+    requireMetadataString(serverName, "mcpServers key", `built MCP configuration for ${pluginDirname}`);
+  }
+
+  const metadataLines = [
+    `plugin-name=${pluginName}`,
+    `plugin-version=${pluginVersion}`,
+    ...mcpServerNames.map(serverName => `mcp-server=${serverName}`),
+  ];
+  writeFileSync(
+    path.join(destinationRoot, "metadata.txt"),
+    `${metadataLines.join("\n")}\n`
+  );
+}
+
+export function assemblePluginHooks(
+  pluginDirname: string,
+  options: HookAssemblyOptions = {},
+): void {
+  const repositoryRoot = options.repositoryRoot ?? __dirname;
+  const outputRoot = options.outputRoot ?? path.join(repositoryRoot, "output");
+  const sharedRoot = path.join(repositoryRoot, "hooks");
+  const pluginRoot = path.join(repositoryRoot, "plugins", pluginDirname, "hooks");
+  const destinationRoot = path.join(outputRoot, pluginDirname, "hooks");
+  const sharedFiles = collectHookFiles(sharedRoot);
+  const pluginFiles = collectHookFiles(pluginRoot);
+
+  for (const requiredFile of REQUIRED_PLUGIN_HOOK_FILES) {
+    if (!pluginFiles.has(requiredFile)) {
+      throw new Error(
+        `Plugin ${pluginDirname} is missing required hook file plugins/${pluginDirname}/hooks/${requiredFile}.`
+      );
+    }
+  }
+
+  const sharedCopyFiles = new Map(
+    [...sharedFiles].filter(
+      ([relativePath]) =>
+        !HOOK_MANIFESTS.includes(relativePath as typeof HOOK_MANIFESTS[number]) &&
+        !relativePath.toLowerCase().endsWith(".md")
+    )
+  );
+  const pluginCopyFiles = new Map(
+    [...pluginFiles].filter(
+      ([relativePath]) =>
+        !HOOK_MANIFESTS.includes(relativePath as typeof HOOK_MANIFESTS[number])
+    )
+  );
+
+  for (const relativePath of pluginCopyFiles.keys()) {
+    if (sharedCopyFiles.has(relativePath)) {
+      throw new Error(
+        `Hook path collision for plugin ${pluginDirname}: ${relativePath} exists in both shared and plugin hook sources.`
+      );
+    }
+  }
+
+  rmSync(destinationRoot, { recursive: true, force: true });
+  mkdirSync(destinationRoot, { recursive: true });
+
+  for (const [relativePath, sourcePath] of sharedCopyFiles) {
+    copyHookFile(sourcePath, path.join(destinationRoot, relativePath));
+  }
+  for (const [relativePath, sourcePath] of pluginCopyFiles) {
+    copyHookFile(sourcePath, path.join(destinationRoot, relativePath));
+  }
+
+  for (const manifestName of HOOK_MANIFESTS) {
+    const sharedPath = sharedFiles.get(manifestName);
+    if (!sharedPath) {
+      throw new Error(`Missing shared hook manifest hooks/${manifestName}.`);
+    }
+
+    const sharedManifest = parseHookManifest(
+      sharedPath,
+      `shared hook manifest hooks/${manifestName}`,
+    );
+    const fragmentPath = pluginFiles.get(manifestName);
+    const compiledManifest = fragmentPath
+      ? mergeHookManifests(
+          sharedManifest,
+          parseHookManifest(
+            fragmentPath,
+            `plugin hook fragment plugins/${pluginDirname}/hooks/${manifestName}`,
+          ),
+          `Plugin hook fragment plugins/${pluginDirname}/hooks/${manifestName}`,
+        )
+      : sharedManifest;
+
+    writeFileSync(
+      path.join(destinationRoot, manifestName),
+      `${JSON.stringify(compiledManifest, null, 2)}\n`,
+    );
+    if (manifestName === "copilot-hooks.json") {
+      const copilotHooksRoot = path.join(
+        outputRoot, pluginDirname, "com.github.copilot", "hooks"
+      );
+      mkdirSync(copilotHooksRoot, { recursive: true });
+      copyFileSync(
+        path.join(destinationRoot, manifestName),
+        path.join(copilotHooksRoot, "hooks.json"),
+      );
+    }
+  }
+
+  writePluginHookMetadata(pluginDirname, outputRoot, destinationRoot);
 }
 
 function buildPlugin(pluginDirname: string): Promise<void> {
@@ -142,6 +538,7 @@ function buildPlugin(pluginDirname: string): Promise<void> {
         `!${pluginSourceDir}/**/version.json`,
         `!${pluginSourceDir}/CHANGELOG.md`,
         `!${pluginSourceDir}/changelog-*.md`, // legacy changelog
+        `!${pluginSourceDir}/hooks/**/*`,
       ],
       { dot: true, encoding: false, base: pluginSourceDir }
     )
@@ -152,12 +549,17 @@ function buildPlugin(pluginDirname: string): Promise<void> {
     pipeline.on("error", (err) => reject(err));
     pipeline.on("end", () => {
       try {
+        assemblePluginHooks(pluginDirname);
+        writePluginAllowlists(pluginOutputDir);
+        copyFileSync(
+          path.join("plugins", "allowed-azure-tools.json"),
+          path.join(pluginOutputDir, "hooks", "allowlists", "allowed-tools.json"),
+        );
         generateChangelog(pluginDirname, legacyChangelog);
-        copyHookScript(pluginDirname);
         resolve();
       } catch (err) {
         const error = err instanceof Error ? err : new Error(String(err));
-        log.error(`Failed to generate CHANGELOG.md for plugins/${pluginDirname}.`, error);
+        log.error(`Failed to build plugins/${pluginDirname}.`, error);
         reject(error);
       }
     });
@@ -216,7 +618,7 @@ export function getVersionedCommits(plugin: string): Commit[] {
   }
 
   // Enumerate all first-parent commits affecting the built plugin from baseline
-  // (inclusive) to HEAD. Shared hooks are copied into every plugin.
+  // (inclusive) to HEAD. Shared hooks and the tool allowlist are copied into every plugin.
   const pluginLogOutput = execSync(
     `git log --first-parent --format=%H%x00%s --reverse ${baselineCommit}~1..HEAD -- ${versionedPaths}`,
     { encoding: "utf-8" }

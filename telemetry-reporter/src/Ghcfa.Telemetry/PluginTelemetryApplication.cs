@@ -28,7 +28,7 @@ public sealed class PluginTelemetryApplication(
     public static PluginTelemetryApplication CreateDefault() =>
         new(
             new PluginTelemetryCommandLineParser(),
-            new PluginTelemetryValidator(PluginTelemetryAllowlist.LoadEmbedded()),
+            new PluginTelemetryValidator(),
             new OpenTelemetryPluginTelemetryPublisher());
 
     public async Task<int> RunAsync(
@@ -59,7 +59,24 @@ public sealed class PluginTelemetryApplication(
 
         var stopwatch = Stopwatch.StartNew();
         var options = parseResult.Options!;
-        var validation = _validator.ValidateAndNormalize(options);
+        PluginTelemetryValidationResult validation;
+        try
+        {
+            validation = _validator.ValidateAndNormalize(options);
+        }
+        catch (ArgumentException exception)
+        {
+            stopwatch.Stop();
+            return await WriteResponseAsync(
+                standardOutput,
+                new CommandResponse
+                {
+                    Status = HttpStatusCode.BadRequest,
+                    Message = exception.Message,
+                    Duration = stopwatch.ElapsedMilliseconds
+                }).ConfigureAwait(false);
+        }
+
         if (!validation.IsValid)
         {
             stopwatch.Stop();

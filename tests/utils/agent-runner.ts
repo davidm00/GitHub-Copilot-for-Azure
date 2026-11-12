@@ -1,32 +1,19 @@
-/**
- * Agent Runner Utility
- * 
- * Executes real Copilot agent sessions for integration testing.
- * Adapted from the project's existing runner.ts pattern.
- * 
- * Prerequisites:
- * - Install Copilot CLI: npm install -g @github/copilot-cli
- * - Login: Run `copilot` and follow prompts to authenticate
- * 
- * Security Note: The config.setup callback receives the workspace path
- * and executes with full process permissions. Only use with trusted test code.
- */
-
-import * as fs from "fs";
-import * as os from "os";
-import * as path from "path";
-import { fileURLToPath } from "url";
-import { type CopilotSession, CopilotClient, type SessionEvent, RuntimeConnection, approveAll, type SystemMessageConfig } from "@github/copilot-sdk";
+import { approveAll, type CopilotClient, type SessionEvent, type SystemMessageConfig } from "@github/copilot-sdk";
+import { fileURLToPath } from "node:url";
 import { redactSecrets } from "./redact.ts";
-import { DEFAULT_SKILL_CHAR_BUDGET, getSkillsForTest, type SkillRef } from "./skill-loader.ts";
-
-// Re-export for backward compatibility (consumers still import from agent-runner)
-export { getAllAssistantMessages } from "./evaluate.ts";
+import { type SkillRef } from "./skill-loader.ts";
+import fs from "node:fs";
+import path from "node:path";
+import type { ProvisionScriptOutput } from "../azure-fixtures/fixture-common.ts";
+import type { TrajectoryEvent } from "@microsoft/vally";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-interface TokenUsage {
+/**
+ * Token usage measurements of an agent run.
+ */
+export type TokenUsage = {
   /** Total input tokens across all LLM calls */
   inputTokens: number;
   /** Total output tokens across all LLM calls */
@@ -46,31 +33,39 @@ interface TokenUsage {
     model: string;
     inputTokens: number;
     outputTokens: number;
+    cacheReadTokens: number;
+    cacheWriteTokens: number;
     durationMs: number;
     initiator?: string;
   }>;
 }
 
-export interface AgentMetadata {
+/**
+ * Data reflecting what had happened during an agent run.
+ */
+export type AgentMetadata = {
   /**
-   * Events emitted by the Copilot SDK agent during the agent run.
+   * Copilot SDK events of the agent run.
+   * If the underlying agent client emit incompatible events, they must be converted to Copilot SDK compatible events and stored here.
    */
   events: SessionEvent[];
 
   /**
    * Comments made by the test author.
-   * These comments will be added to the agentMetadata markdown for an LLM or human reviewer to read.
+   * These comments will be added to the final formatted report.
    */
   testComments: string[];
 
   /**
-   * Token usage and cost data extracted from assistant.usage and session.shutdown events.
+   * Token usage and cost data extracted for the agent run.
    */
   tokenUsage?: TokenUsage;
 
+  /** Whether the evaluation answer-generation session completed normally or was interrupted. */
+  completionStatus?: "completed" | "aborted";
+
   /**
-   * Number of assistant turns that started during the run,
-   * counted from `assistant.turn_start` events.
+   * Number of turns that started during the run.
    */
   turnCount: number;
 
@@ -96,11 +91,98 @@ export interface AgentMetadata {
   skillsLoaded: SkillRef[];
 }
 
+export type AgentRunConfig = {
+  /**
+   * An optional function to configure the test workspace.
+   * The test runner will create an empty workspace, initialize it following the environment config
+   * of the vally stimuli, and then call this function.
+   * @param workspace The absolute path to the test workspace directory.
+   */
+  setup?: (workspace: string) => Promise<void>;
+
+  /**
+   * Additional environment variables to set/override on top of those inherited from the parent process.
+   */
+  env?: Record<string, string>;
+
+  /**
+   * The model to use for the test run.
+   * Note: different agent client may refer to the same model using different names.
+   */
+  model?: string;
+
+  /**
+   * The first user prompt to send to the agent.
+   */
+  prompt: string;
+
+  /**
+   * Subsequent user prompts to send to the agent.
+   */
+  followUp?: string[];
+
+  /**
+   * If provided, the agent will call this function to determine if it should early terminate the run.
+   * @param metadata Data reflecting what had happened so far
+   * @returns Whether to early terminate
+   */
+  shouldEarlyTerminate?: (metadata: AgentMetadata) => boolean;
+
+  /**
+   * If provided, the system prompt will be modified according to the provided config.
+   */
+  systemPrompt?: SystemMessageConfig;
+
+  /**
+   * Optional. An absolute path to a directory.
+   * if not specified, the agent runner will create a temporary directory and use it as the workspace.
+   */
+  workspace?: string;
+
+  /**
+   * Whether to preserve the test workspace after the test run finishes.
+   */
+  preserveWorkspace?: boolean;
+
+  /**
+   * Skills to include for the agent run.
+   * If undefined, all the skills in azure plugin will be included.
+   * If specified, only the skills in this array will be included. This option overrides the required skills specified in the {@link requiredSkills}.
+   */
+  includeSkills?: SkillRef[];
+
+  /**
+   * Maximum number of assistant turns allowed before the run is aborted.
+   * If undefined, there is no turn limit.
+   */
+  maxTurns?: number;
+
+  /**
+   * Number of milliseconds as timeout for the entire run.
+   */
+  timeout?: number;
+
+  /**
+   * Whether to take a screenshot of the application after the agent work.
+   * The predicate function will be called with the agentMetadata. If the return value is true, the agent runner will attempt to take a screenshot of the app. Otherwise, no screenshot will be taken.
+   * If undefined, the agent runner won't attempt to take a screenshot.
+   */
+  takeScreenshot?: {
+    predicate: (agentMetadata: AgentMetadata) => boolean
+  };
+
+  /**
+   * Skills that must be present with full description.
+   * Skills other than the required ones will be randomly disabled until the estimated char count falls below the char count budget.
+   */
+  requiredSkills?: SkillRef[];
+}
+
 /**
  * A single tool invocation captured during an agent run, in emission order.
  * Includes the `skill` pseudo-tool so the full sequence can be reconstructed.
  */
-export interface ToolCall {
+export type ToolCall = {
   /** 0-based index over `tool.execution_start` events in emission order. */
   order: number;
   /** Raw `event.data.toolName` (e.g. "skill", "bash", an MCP tool name). */
@@ -127,106 +209,33 @@ export interface ToolCall {
   outputBytes: number | null;
 }
 
-/**
- * Structured, per-run record of the tools called during a single agent run.
- * Written alongside (and named to match) that run's markdown report so the tool
- * sequence for a specific run can be reconstructed even when the same stimulus
- * runs multiple times in the same test-case directory.
- */
-export interface ToolUsageRecord {
+export type AgentRunnerConfig = {
+  /**
+   * Name of the test.
+   */
   testName: string;
-  /** Basename of this run's `agent-metadata-<token>.md` report (1:1 correlation). */
-  reportFile: string;
-  /** Session id from the `session.start` event, if present. */
-  sessionId: string | null;
-  model: string | undefined;
-  /** ISO-8601 timestamp of when this file was written. */
-  timestamp: string;
-  toolCalls: ToolCall[];
+};
+
+/**
+ * An agent runner for integration test. The agent run has the following duties:
+ * 1. Collect agent run events and save them as Copilot SDK compatible events in AgentMetadata. Write agent metadata to the
+ * 2. Compute statistics and save them in AgentMetadata
+ */
+export interface IAgentRunner {
+  /**
+   * Executes an agent run and returns the metadata collected during the session.
+   */
+  run(runConfig: AgentRunConfig): Promise<AgentMetadata>;
+
+  /**
+   * Releases active sessions, clients, and temporary workspaces managed by the runner.
+   */
+  cleanup(): Promise<void>;
 }
 
 /**
- * A unique identifier to use for the test run name.
- * By default, reports for each test run will be written to a pseudo-unique directory under "reports/test-run-{timestamp}/".
- * If {@link testRunId} is non-empty, reports for this test run will be written to a directory under "reports/test-run-{testRunId}/".
- * This allows reports from multiple test runs to be written to the same directory.
- *
- * Only applicable when the agent run is for a test.
+ * Utilities for all agent runners
  */
-const testRunId = process.env.TEST_RUN_ID;
-
-/**
- * The model to use for the agent run.
- */
-const modelOverride = process.env.MODEL_OVERRIDE?.trim();
-
-const PER_TURN_TIMEOUT = 1800000; // 30 minutes
-
-export interface AgentRunConfig {
-  setup?: (workspace: string) => Promise<void>;
-  env?: Record<string, string>;
-  model?: string;
-  prompt: string;
-  shouldEarlyTerminate?: (metadata: AgentMetadata) => boolean;
-  nonInteractive?: boolean;
-  followUp?: string[];
-  systemPrompt?: SystemMessageConfig;
-
-  /**
-   * Optional. An absolute path to a directory.
-   * if not specified, the agent will create a temporary directory and use it as the workspace.
-   */
-  workspace?: string;
-  preserveWorkspace?: boolean;
-
-  /**
-   * Skills to include for the agent run.
-   * If undefined, all the skills in azure plugin will be included.
-   * If specified, only the skills in this array will be included. This option overrides the required skills specified in the {@link requiredSkills}.
-   */
-  includeSkills?: SkillRef[];
-
-  /**
-   * Maximum number of assistant turns allowed before the run is aborted.
-   * Each `assistant.turn_start` event counts as one turn.
-   * If undefined, there is no turn limit.
-   */
-  maxTurns?: number;
-
-  /**
-   * Number of milliseconds as timeout for the entire run.
-   */
-  timeout?: number;
-
-  /**
-   * Whether to take a screenshot of the application after the agent work.
-   * The predicate function will be called with the agentMetadata. If the return value is true, the agent runner will attempt to take a screenshot of the app. Otherwise, no screenshot will be taken.
-   * If undefined, the agent runner won't attempt to take a screenshot.
-   */
-  takeScreenshot?: {
-    predicate: (agentMetadata: AgentMetadata) => boolean
-  };
-
-  /**
-   * Skills that must be present with full description.
-   * Skills other than the required ones will be randomly disabled until the estimated char count falls below the char count budget.
-   */
-  requiredSkills?: SkillRef[];
-}
-
-interface KeywordOptions {
-  caseSensitive?: boolean;
-}
-
-/** Tracks resources that need cleanup after each test */
-interface RunnerCleanup {
-  session?: CopilotSession;
-  client?: CopilotClient;
-  workspace?: string;
-  preserveWorkspace?: boolean;
-  config?: AgentRunConfig;
-  agentMetadata?: AgentMetadata;
-}
 
 /**
  * Extract file-system paths from the serialized arguments of a tool call that
@@ -301,7 +310,7 @@ function extractSkillDirPaths(args: unknown, skillDirectories: string[]): string
  * - `skillFiles` is populated from any tool invocation whose arguments reference
  *   a path under the given skill directory (`output/<plugin-dir>/skills/<skill>/...`).
  */
-function computeToolAndSkillStats(
+export function computeToolAndSkillStats(
   events: SessionEvent[],
   skillDirectories: string[]
 ): { toolCounts: Record<string, number>; skillFiles: Record<string, string[]> } {
@@ -442,7 +451,7 @@ function computeOutputBytes(
  * completion timestamp. Returns `null` when the completion is missing or either
  * timestamp is unparseable, or when the result would be negative.
  */
-function computeDurationMs(startTs: string, completeTs: string | undefined): number | null {
+export function computeDurationMs(startTs: string, completeTs: string | undefined): number | null {
   if (!completeTs) return null;
   const start = Date.parse(startTs);
   const end = Date.parse(completeTs);
@@ -468,7 +477,7 @@ export function deriveToolUsageFileName(reportFilePath: string): string {
 /**
  * Generate a markdown report from agent metadata
  */
-function generateMarkdownReport(config: AgentRunConfig, agentMetadata: AgentMetadata): string {
+export function generateMarkdownReport(config: AgentRunConfig, agentMetadata: AgentMetadata): string {
   const lines: string[] = [];
 
   // Comment by the test author in test code
@@ -697,326 +706,33 @@ function generateMarkdownReport(config: AgentRunConfig, agentMetadata: AgentMeta
   return lines.join("\n");
 }
 
-export type AgentRunnerConfig = {
-  /**
-   * If the runner is running for an integration test.
-   */
-  isTest: boolean;
-
-  /**
-   * Name of the test.
-   * Only used when the runner is running for a test and isn't running in a jest environment.
-   */
-  testName?: string;
-};
-
-/**
- * Sets up the agent runner with proper per-test cleanup via afterEach.
- * Call once inside each describe() block. Each describe() gets its own
- * isolated cleanup scope via closure, so parallel file execution is safe.
- */
-export function useAgentRunner(agentRunnerConfig: AgentRunnerConfig) {
-  let currentCleanups: RunnerCleanup[] = [];
-  const config = agentRunnerConfig;
-
-  async function cleanup(): Promise<void> {
-    for (const entry of currentCleanups) {
-      try {
-        if (entry.session) {
-          await entry.session.disconnect();
-        }
-      } catch { /* ignore */ }
-      try {
-        if (entry.client) {
-          await entry.client.stop();
-        }
-      } catch { /* ignore */ }
-      try {
-        if (entry.workspace && !entry.preserveWorkspace) {
-          fs.rmSync(entry.workspace, { recursive: true, force: true });
-        }
-      } catch { /* ignore */ }
-    }
-    currentCleanups = [];
-  }
-
-  function isTest(): boolean {
-    return config.isTest;
-  }
-
-  function getTestName(): string {
-    return config.testName ?? "unknown";
-  }
-
-  async function run(runConfig: AgentRunConfig): Promise<AgentMetadata> {
-    let testWorkspace: string;
-    if (runConfig.workspace) {
-      testWorkspace = runConfig.workspace;
-    } else {
-      testWorkspace = fs.mkdtempSync(path.join(os.tmpdir(), "skill-test-"));
-    }
-
-    let isComplete = false;
-    let isAborted = false;
-
-    const entry: RunnerCleanup = { config: runConfig };
-    currentCleanups.push(entry);
-    entry.workspace = testWorkspace;
-    entry.preserveWorkspace = runConfig.preserveWorkspace;
-
-    const agentMetadata: AgentMetadata = { events: [], testComments: [], turnCount: 0, toolCounts: {}, skillFiles: {}, skillsLoaded: [] };
-    entry.agentMetadata = agentMetadata;
-
-    try {
-      // Run optional setup
-      if (runConfig.setup) {
-        await runConfig.setup(testWorkspace);
-      }
-
-      // Copilot client with yolo mode
-      const cliArgs: string[] = runConfig.nonInteractive ? ["--yolo"] : [];
-      if (process.env.DEBUG && isTest()) {
-        cliArgs.push("--log-dir");
-        cliArgs.push(buildTestCaseDirPath(getTestName()));
-      }
-
-      // Copilot CLI emits lots of warnings about experimental features which clutters the console output so we suppress them.
-      const existingNodeOptions = process.env.NODE_OPTIONS;
-      const envVar: Record<string, string> = {
-        SKILLS_INSTRUCTIONS: "true",
-        SKILL_CHAR_BUDGET: `${DEFAULT_SKILL_CHAR_BUDGET}`,
-        NODE_OPTIONS: existingNodeOptions
-          ? `${existingNodeOptions} --disable-warning=ExperimentalWarning`
-          : "--disable-warning=ExperimentalWarning"
-      };
-
-      const client = new CopilotClient({
-        logLevel: process.env.DEBUG ? "all" : "error",
-        workingDirectory: testWorkspace,
-        connection: RuntimeConnection.forStdio({ args: cliArgs }),
-        env: {
-          ...process.env,
-          ...envVar,
-          ...runConfig.env
-        }
-      }) as CopilotClient;
-      entry.client = client;
-
-      const { skillsLoaded, skillDirectories, disabledSkills } = await getSkillsForTest(
-        runConfig.requiredSkills,
-        runConfig.includeSkills
-      );
-      agentMetadata.skillsLoaded = skillsLoaded;
-
-      const disableAzureMcp = process.env.VALLY_RUNNER_DISABLE_AZURE_MCP === "true";
-      const model = runConfig.model ?? modelOverride ?? "claude-sonnet-5";
-      const session = await client.createSession({
-        model: model,
-        onPermissionRequest: approveAll,
-        skillDirectories: skillDirectories,
-        disabledSkills: disabledSkills?.map(s => s.name),
-        ...(disableAzureMcp ? {} : {
-          mcpServers: {
-            azure: {
-              type: "stdio",
-              command: "npx",
-              args: ["-y", "@azure/mcp", "server", "start"],
-              tools: ["*"]
-            }
-          }
-        }),
-        systemMessage: runConfig.systemPrompt,
-        // Disable session telemetry so usage of skills and tools by the test agent runner don't end up sending Copilot CLI telemetry.
-        enableSessionTelemetry: false
-      });
-      entry.session = session;
-
-      const startTime = new Date().getTime();
-      const done = new Promise<void>((resolve) => {
-        // Global timeout for the entire run, including all turns
-        if (runConfig.timeout !== undefined) {
-          const timeoutTimer = setTimeout(async () => {
-            if (!isComplete) {
-              isComplete = true;
-              isAborted = true;
-              const currentTime = new Date().getTime();
-              agentMetadata.testComments.push(
-                `⚠️ Run aborted: run time (${currentTime - startTime} ms) exceeded timeout (${runConfig.timeout} ms).`
-              );
-              try {
-                await session.abort();
-              } catch (error) {
-                console.error(`session.abort failed ${error instanceof Error ? error.message : String(error)}`);
-              } finally {
-                resolve();
-              }
-            }
-          }, runConfig.timeout);
-          timeoutTimer.unref();
-        }
-        session.on(async (event: SessionEvent) => {
-          if (isComplete) return;
-
-          if (process.env.DEBUG) {
-            console.log(`=== session event ${event.type}`);
-          }
-
-          if (event.type === "session.idle") {
-            isComplete = true;
-            resolve();
-            return;
-          }
-
-          agentMetadata.events.push(event);
-
-          if (event.type === "assistant.turn_start") {
-            agentMetadata.turnCount++;
-            if (runConfig.maxTurns !== undefined && agentMetadata.turnCount > runConfig.maxTurns) {
-              agentMetadata.testComments.push(
-                `⚠️ Run aborted: turn count (${agentMetadata.turnCount}) exceeded maxTurns (${runConfig.maxTurns}).`
-              );
-              isComplete = true;
-              isAborted = true;
-              try {
-                await session.abort();
-              } catch (error) {
-                console.error(`session.abort failed ${error instanceof Error ? error.message : String(error)}`);
-              } finally {
-                resolve();
-              }
-              return;
-            }
-          }
-
-          if (runConfig.shouldEarlyTerminate?.(agentMetadata)) {
-            isComplete = true;
-            isAborted = true;
-            try {
-              await session.abort();
-            } catch (error) {
-              console.error(`session.abort failed ${error instanceof Error ? error.message : String(error)}`);
-            } finally {
-              resolve();
-            }
-            return;
-          }
-        });
-      });
-
-      await session.send({ prompt: runConfig.prompt });
-      await done;
-
-      // Send follow-up prompts before aggregating stats so tool/skill/token
-      // counts include events emitted during follow-up turns.
-      // Skip follow-ups when the run was aborted.
-      for (const followUpPrompt of (runConfig.followUp ?? [])) {
-        if (isAborted) break;
-        isComplete = false;
-        await session.sendAndWait({ prompt: followUpPrompt }, PER_TURN_TIMEOUT);
-      }
-
-      // Extract token usage from assistant.usage events
-      const tokenUsage: TokenUsage = {
-        inputTokens: 0,
-        outputTokens: 0,
-        cacheReadTokens: 0,
-        cacheWriteTokens: 0,
-        totalApiDurationMs: 0,
-        apiCallCount: 0,
-        model: model,
-        perCallUsage: [],
-      };
-
-      for (const event of agentMetadata.events) {
-        if (event.type === "assistant.usage") {
-          tokenUsage.inputTokens += event.data.inputTokens ?? 0;
-          tokenUsage.outputTokens += event.data.outputTokens ?? 0;
-          tokenUsage.cacheReadTokens += event.data.cacheReadTokens ?? 0;
-          tokenUsage.cacheWriteTokens += event.data.cacheWriteTokens ?? 0;
-          tokenUsage.totalApiDurationMs += event.data.duration ?? 0;
-          tokenUsage.apiCallCount++;
-          tokenUsage.model = event.data.model || tokenUsage.model;
-          tokenUsage.perCallUsage.push({
-            model: event.data.model,
-            inputTokens: event.data.inputTokens ?? 0,
-            outputTokens: event.data.outputTokens ?? 0,
-            durationMs: event.data.duration ?? 0,
-            initiator: event.data.initiator,
-          });
-        }
-        // Also capture aggregate from session.shutdown if available
-        if (event.type === "session.shutdown" && event.data.modelMetrics) {
-          for (const [model, metrics] of Object.entries(event.data.modelMetrics)) {
-            tokenUsage.model = model;
-            // Prefer shutdown totals if usage events were missed
-            if (tokenUsage.apiCallCount === 0) {
-              tokenUsage.inputTokens = metrics?.usage.inputTokens ?? 0;
-              tokenUsage.outputTokens = metrics?.usage.outputTokens ?? 0;
-              tokenUsage.cacheReadTokens = metrics?.usage.cacheReadTokens ?? 0;
-              tokenUsage.cacheWriteTokens = metrics?.usage.cacheWriteTokens ?? 0;
-              tokenUsage.apiCallCount = metrics?.requests.count ?? 0;
-            }
-          }
-        }
-      }
-
-      agentMetadata.tokenUsage = tokenUsage;
-
-      // Aggregate tool invocation counts and skill-file reads
-      const { toolCounts, skillFiles } = computeToolAndSkillStats(agentMetadata.events, skillDirectories);
-      agentMetadata.toolCounts = toolCounts;
-      agentMetadata.skillFiles = skillFiles;
-
-      if (runConfig.takeScreenshot && runConfig.takeScreenshot.predicate(agentMetadata)) {
-        // Resume the session so it can take a different set of skills and mcp servers.
-        // Use playwright mcp server to take a screenshot.
-        const screenshotTimeout = 180000; // 3 minutes
-        const screenshotPath = path.join(buildTestCaseDirPath(getTestName()), "app-snapshot.jpg");
-        const playwrightSession = await client.resumeSession(session.sessionId, {
-          mcpServers: {
-            playwright: {
-              command: "npx",
-              args: [
-                "@playwright/mcp@0.0.71"
-              ],
-              tools: ["*"]
-            }
-          },
-          onPermissionRequest: approveAll,
-          // Disable session telemetry so usage of skills and tools by the test agent runner don't end up sending Copilot CLI telemetry.
-          enableSessionTelemetry: false
-        });
-        await playwrightSession.sendAndWait({
-          prompt: `Use playwright mcp tools to take a screenshot of the deployed app. Save the screenshot to this directory at this file location ${screenshotPath}`
-        }, screenshotTimeout);
-
-        // Check if screenshot was successfully created
-        const screenshotExists = fs.existsSync(screenshotPath);
-        agentMetadata.testComments.push(
-          `Screenshot attempt: ${screenshotExists ? "✓ app-snapshot.jpg created successfully" : "✗ app-snapshot.jpg not found after screenshot attempt"}`
-        );
-      }
-
-      return agentMetadata;
-    } catch (error) {
-      // Mark as complete to stop event processing
-      isComplete = true;
-      const errorDetails = error instanceof Error
-        ? (error.message)
-        : String(error);
-      agentMetadata.testComments.push(`❗️Agent runner error: ${errorDetails}`);
-      console.error("Agent runner error:", errorDetails);
-      throw error;
-    } finally {
-      await cleanup();
-    }
-  }
-
-  return { run, cleanup };
+export function buildTestCaseDirPath(testName: string): string {
+  return path.join(DEFAULT_REPORT_DIR, testRunDirectoryName, testName);
 }
 
-function buildTestCaseDirPath(testName: string): string {
-  return path.join(DEFAULT_REPORT_DIR, testRunDirectoryName, testName);
+export async function takeScreenshot(client: CopilotClient, sessionId: string, testName: string, agentMetadata: AgentMetadata): Promise<void> {
+  const screenshotTimeout = 180000;
+  const screenshotPath = path.join(buildTestCaseDirPath(testName), "app-snapshot.jpg");
+  const playwrightSession = await client.resumeSession(sessionId, {
+    mcpServers: {
+      playwright: {
+        command: "npx",
+        args: ["@playwright/mcp@0.0.71"],
+        tools: ["*"]
+      }
+    },
+    onPermissionRequest: approveAll,
+    enableSessionTelemetry: false
+  });
+
+  await playwrightSession.sendAndWait({
+    prompt: `Use playwright mcp tools to take a screenshot of the deployed app. Save the screenshot to this directory at this file location ${screenshotPath}`
+  }, screenshotTimeout);
+
+  const screenshotExists = fs.existsSync(screenshotPath);
+  agentMetadata.testComments.push(
+    `Screenshot attempt: ${screenshotExists ? "✓ app-snapshot.jpg created successfully" : "✗ app-snapshot.jpg not found after screenshot attempt"}`
+  );
 }
 
 function buildShareFilePath(testName: string): string {
@@ -1069,6 +785,24 @@ function writeTokenUsageJson(testName: string, config: AgentRunConfig, agentMeta
 }
 
 /**
+ * Structured, per-run record of the tools called during a single agent run.
+ * Written alongside (and named to match) that run's markdown report so the tool
+ * sequence for a specific run can be reconstructed even when the same stimulus
+ * runs multiple times in the same test-case directory.
+ */
+export interface ToolUsageRecord {
+  testName: string;
+  /** Basename of this run's `agent-metadata-<token>.md` report (1:1 correlation). */
+  reportFile: string;
+  /** Session id from the `session.start` event, if present. */
+  sessionId: string | null;
+  model: string | undefined;
+  /** ISO-8601 timestamp of when this file was written. */
+  timestamp: string;
+  toolCalls: ToolCall[];
+}
+
+/**
  * Write markdown report to file
  */
 function writeMarkdownReport(testName: string, config: AgentRunConfig, agentMetadata: AgentMetadata): void {
@@ -1100,8 +834,8 @@ function writeMarkdownReport(testName: string, config: AgentRunConfig, agentMeta
       }
     }
 
-    // Write structured agent-metadata.json for machine consumption
-    const jsonPath = path.join(dir, "agent-metadata.json");
+    // Match the final markdown filename, including any collision suffix.
+    const jsonPath = reportTargetPath.replace(/\.md$/, ".json");
     const jsonData = {
       prompt: config.prompt || "",
       events: agentMetadata.events,
@@ -1109,18 +843,18 @@ function writeMarkdownReport(testName: string, config: AgentRunConfig, agentMeta
       tokenUsage: agentMetadata.tokenUsage,
       toolCounts: agentMetadata.toolCounts,
       skillFiles: agentMetadata.skillFiles,
+      skillsLoaded: agentMetadata.skillsLoaded
     };
     fs.writeFileSync(jsonPath, redactSecrets(JSON.stringify(jsonData, null, 2)), "utf-8");
 
     // Write per-run tool-usage JSON (Phase 1: capture for review). Named to match
     // this run's markdown report so the tool sequence for a specific run can be
     // reconstructed even when the same stimulus runs multiple times in one
-    // directory (where agent-metadata.json is overwritten). Best-effort: never
+    // directory. Best-effort: never
     // fail a test because capture failed.
     try {
       const toolUsagePath = deriveToolUsageFileName(reportTargetPath);
-      const sessionId =
-        agentMetadata.events.find((e) => e.type === "session.start")?.id ?? null;
+      const sessionId = agentMetadata.events.find((e) => e.type === "session.start")?.data.sessionId ?? null;
       const toolUsage: ToolUsageRecord = {
         testName,
         reportFile: path.basename(reportTargetPath),
@@ -1179,6 +913,10 @@ export function areToolCallsSuccess(agentMetadata: AgentMetadata, toolName?: str
   });
 }
 
+interface KeywordOptions {
+  caseSensitive?: boolean;
+}
+
 /**
  * Check if assistant messages contain a keyword
  */
@@ -1205,45 +943,196 @@ export function doesAssistantMessageIncludeKeyword(
   });
 }
 
-// Track skip reason for reporting
-let integrationSkipReason: string | undefined;
-
-/**
- * Check if integration tests should be skipped
- * 
- * Integration tests are skipped when:
- * - SKIP_INTEGRATION_TESTS=true is set
- * - @github/copilot-sdk is not installed
- */
-export function shouldSkipIntegrationTests(): boolean {
-  // Skip if explicitly requested
-  if (process.env.SKIP_INTEGRATION_TESTS === "true") {
-    integrationSkipReason = "SKIP_INTEGRATION_TESTS=true";
-    return true;
-  }
-
-  // Check if SDK package exists
-  try {
-    const sdkPath = path.join(__dirname, "..", "node_modules", "@github", "copilot-sdk", "package.json");
-    if (!fs.existsSync(sdkPath)) {
-      integrationSkipReason = "@github/copilot-sdk not installed";
-      return true;
-    }
-  } catch {
-    integrationSkipReason = "@github/copilot-sdk not installed";
-    return true;
-  }
-
-  return false;
-}
-
-/**
- * Get the reason why integration tests are being skipped
- */
-export function getIntegrationSkipReason(): string | undefined {
-  return integrationSkipReason;
-}
-
 const DEFAULT_REPORT_DIR = path.join(__dirname, "..", "reports");
-const TIME_STAMP = (process.env.START_TIMESTAMP || new Date().toISOString()).replace(/[:.]/g, "-");
-const testRunDirectoryName = `test-run-${testRunId || TIME_STAMP}`;
+
+/**
+ * A unique identifier to use for the test run name.
+ * By default, reports for each test run will be written to a pseudo-unique directory under "reports/test-run-{timestamp}/".
+ * If {@link testRunId} is non-empty, reports for this test run will be written to a directory under "reports/test-run-{testRunId}/".
+ * This allows reports from multiple test runs to be written to the same directory.
+ *
+ * Only applicable when the agent run is for a test.
+ */
+const testRunId = process.env.TEST_RUN_ID;
+export const TIME_STAMP = (process.env.START_TIMESTAMP || new Date().toISOString()).replace(/[:.]/g, "-");
+export const testRunDirectoryName = `test-run-${testRunId || TIME_STAMP}`;
+
+export function getAzureScopePrompt(fixtureOutput: ProvisionScriptOutput): string {
+  return `Limit your operations in the following resource groups: ${JSON.stringify(fixtureOutput.resourceGroups)}. Never read or modify resources outside these resource groups.`;
+}
+
+type ToolExecutionStartData = Extract<SessionEvent, { type: "tool.execution_start" }>["data"];
+
+function toTrajectoryToolCallData(data: ToolExecutionStartData): Extract<TrajectoryEvent, { type: "tool_call" }>["data"] {
+  const args = data.arguments;
+  const namespace = data.mcpToolName;
+  if (namespace
+    && args !== null && typeof args === "object" && !Array.isArray(args)
+    && args.learn !== true && typeof args.command === "string"
+    && args.command.toLowerCase().startsWith(`${namespace.toLowerCase()}_`)) {
+    return { ...data, toolName: args.command, arguments: args.parameters ?? {} };
+  }
+  return data;
+}
+
+export function convertToTrajectoryEvents(agentMetadata: AgentMetadata): TrajectoryEvent[] {
+  const result: TrajectoryEvent[] = [];
+  const invokedSkillNames = new Set(
+    agentMetadata.events
+      .filter((event): event is Extract<SessionEvent, { type: "skill.invoked" }> =>
+        event.type === "skill.invoked")
+      .map(event => event.data.name),
+  );
+
+  const toolCallsById = new Map<string, ToolExecutionStartData>();
+  for (const e of agentMetadata.events) {
+    if (e.type === "tool.execution_start") {
+      toolCallsById.set(e.data.toolCallId, e.data);
+    }
+  }
+
+  // Note: Vally and each agent SDK has different definitions for "turns".
+  // Vally defines a turn as interactions between when an explicit user prompt is submitted and before the next user prompt is processed.
+  // This aligns with the turns input on the stimuli.
+  // If a certain outcome is expected from the agent for processing a turn's user prompt, the grader can be
+  // scoped to that turn to verify the outcome.
+  //
+  // Copilot SDK defines a turn as interactions between submitting a prompt to the LLM and before submitting the next.
+  // This includes implicit prompts such as loaded skills or tool call results.
+  // As a result, for a Vally turn, there can be more than one Copilot SDK turns if it had made more than one requests to the LLM.
+  //
+  // We track the turn number using Vally's definition by tracking the user.message events so the graders can work properly.
+  let turnNumber = -1;
+  for (const e of agentMetadata.events) {
+    if (e.type === "user.message") {
+      turnNumber += 1;
+    }
+    const firstConvertedEventIndex = result.length;
+    const timestamp = e.timestamp ? new Date(e.timestamp) : undefined;
+
+    if (e.type === "assistant.message") {
+      result.push({
+        type: "assistant_message",
+        timestamp,
+        data: {
+          content: e.data.content,
+        },
+      });
+    } else if (e.type === "assistant.reasoning") {
+      result.push({
+        type: "reasoning",
+        timestamp,
+        data: {
+          content: e.data.content,
+        },
+      });
+    } else if (e.type === "user.message") {
+      result.push({
+        type: "user_message",
+        timestamp,
+        data: {
+          content: e.data.content,
+          agent_mode: e.data.agentMode,
+        },
+      });
+    } else if (e.type === "assistant.turn_start") {
+      result.push({
+        type: "turn_start",
+        timestamp,
+        data: {
+          turnId: e.data.turnId,
+        },
+      });
+    } else if (e.type === "assistant.turn_end") {
+      result.push({
+        type: "turn_end",
+        timestamp,
+        data: {
+          turnId: e.data.turnId,
+        },
+      });
+    } else if (e.type === "tool.execution_start") {
+      if (e.data.toolName === "skill") {
+        // Note: Although this type is defined, Copilot CLI in practice treat skills as tool calls.
+        // We look for tool call events for skill and convert them into skill events.
+        const args = e.data.arguments;
+        let skillName: string;
+        if (typeof args === "object" && !Array.isArray(args)) {
+          skillName = (args?.skill as string) ?? "unknown";
+        } else {
+          skillName = "unknown";
+        }
+        if (!invokedSkillNames.has(skillName)) {
+          result.push({
+            type: "skill_activation",
+            timestamp,
+            data: {
+              name: skillName,
+              path: "Not supported. Skill invocation detected from tool.execution_start event without matching skill.invoked event."
+            },
+          });
+        }
+      }
+      result.push({
+        type: "tool_call",
+        timestamp,
+        data: toTrajectoryToolCallData(e.data),
+      });
+    } else if (e.type === "tool.execution_complete") {
+      const toolCall = toolCallsById.get(e.data.toolCallId);
+      const toolName = toolCall ? toTrajectoryToolCallData(toolCall).toolName : "unknown";
+      result.push({
+        type: "tool_result",
+        timestamp,
+        data: {
+          toolName,
+          toolCallId: e.data.toolCallId,
+          success: e.data.success,
+          result: e.data.result ?? e.data.error,
+        },
+      });
+    } else if (e.type === "assistant.usage") {
+      result.push({
+        type: "token_usage",
+        timestamp,
+        data: {
+          model: e.data.model,
+          inputTokens: e.data.inputTokens ?? -1,
+          outputTokens: e.data.outputTokens ?? -1,
+          cacheReadTokens: e.data.cacheReadTokens,
+          cacheWriteTokens: e.data.cacheWriteTokens,
+        },
+      });
+    } else if (e.type === "skill.invoked") {
+      // Note: Although this type is defined, Copilot CLI in practice treat skills as tool calls.
+      // We look for tool call events for skill and convert them into skill events.
+      result.push({
+        type: "skill_activation",
+        timestamp,
+        data: {
+          name: e.data.name,
+          path: e.data.path
+        },
+      });
+    } else if (e.type === "session.error") {
+      result.push({
+        type: "error",
+        timestamp,
+        data: {
+          message: e.data.message,
+          type: e.data.errorType,
+          url: e.data.url,
+          code: e.data.statusCode,
+        },
+      });
+    }
+
+    if (turnNumber >= 0) {
+      for (let i = firstConvertedEventIndex; i < result.length; i++) {
+        result[i].turn = turnNumber;
+      }
+    }
+  }
+
+  return result;
+}

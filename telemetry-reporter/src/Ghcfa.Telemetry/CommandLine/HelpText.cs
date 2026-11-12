@@ -7,12 +7,16 @@ public static class HelpText
 {
     public const string Value = """
         Usage:
-          ghcfa-telem --timestamp <value> --event-type <value> --session-id <value> [options]
+          ghcfa-telem --timestamp <value> --event-type <value> --session-id <value>
+            --allowed-skills <path> --allowed-references <path> --allowed-tools <path> [options]
 
         Required options:
           --timestamp <value>       Timestamp of the telemetry event in ISO 8601 format.
           --event-type <value>      Event type, such as skill_invocation, tool_invocation, or reference_file_read.
           --session-id <value>      Session identifier for correlating related events.
+          --allowed-skills <path>       Skill allowlist as newline-separated text.
+          --allowed-references <path>   Reference-file allowlist as newline-separated text.
+          --allowed-tools <path>        Tool allowlists as grouped JSON.
 
         Optional values:
           --client-type <value>
@@ -24,6 +28,19 @@ public static class HelpText
           --tool-name <value>
           --file-reference <value>
           --dangerously-write-support-logs-to-dir <path>
+
+        Allowlist files:
+          Matching is case-sensitive. All files use UTF-8.
+          Skills and references: one name or path per line.
+          Surrounding whitespace, blank lines, and # comment lines are ignored in these text files.
+          Reference entries and reported paths match with either / or \ separators.
+          Tools: JSON with required commands, areas, and extensionTools object sections.
+          Each section maps entry labels to non-empty arrays of names.
+          Example: {"commands":{"1.0":["subscription_list"]},"areas":{},"extensionTools":{}}
+          All three file paths are required; no built-in lists are included.
+          Empty text files or JSON sections allow no values.
+          Unreadable files or malformed tool JSON fail without publishing telemetry.
+          Relative file paths are resolved against the current working directory.
 
         Flags:
           --debug

@@ -11,9 +11,13 @@ should modify the project.
 - `src/Ghcfa.Telemetry/` contains command parsing, validation, telemetry, and
   platform-specific machine information behavior.
 - `tests/Ghcfa.Telemetry.Tests/` contains the .NET unit tests.
-- `resources/` contains Azure MCP allowlists embedded by `Ghcfa.Telemetry`.
+- Allowlists come exclusively from the three required command-line file paths;
+  no skill, reference, or tool lists are embedded in `Ghcfa.Telemetry`.
 - `eng/scripts/Build-Native.ps1` creates opt-in Native AOT packages for the
-  Azure MCP operating system and architecture matrix.
+  Azure MCP operating system and architecture matrix plus musl Linux.
+- `eng/native-musl/Dockerfile` supplies the same-architecture Alpine toolchain.
+- `eng/scripts/NativePackaging.psm1` defines supported targets, host mappings,
+  and runtime/symbol archive and checksum validation.
 
 The repository-level `tests/AGENTS.md` does not apply to this directory.
 
@@ -25,9 +29,9 @@ The repository-level `tests/AGENTS.md` does not apply to this directory.
   divergence. Preserve `AZURE_MCP_COLLECT_TELEMETRY` as the global opt-out, and
   do not add user-configurable Application Insights or OTLP sinks.
 - Treat `CompatibilityConstants.AzureMcpCommit` as the source revision for the
-  copied behavior and allowlists.
+  copied runtime behavior, not the independently maintained allowlist files.
 - When synchronizing with a newer Azure MCP revision, update the compatibility
-  constants, embedded resources, implementation, tests, README, and third-party
+  constants, implementation, tests, README, and third-party
   notices as applicable.
 - Keep telemetry disabled in build or smoke-test scenarios that invoke the
   executable.
@@ -45,10 +49,13 @@ dotnet test .\ghcfa-telem.slnx --configuration Release --no-build
 ```
 
 Normal builds are framework-dependent. Native AOT is opt-in and supports
-`win-x64`, `win-arm64`, `linux-x64`, `linux-arm64`, `osx-x64`, and
-`osx-arm64`. Follow the host mapping and platform toolchain prerequisites in
-the README. Smoke tests run only when the target RID matches the host RID;
-cross-compiled Windows and macOS ARM64 packages report an explicit skip.
+`win-x64`, `win-arm64`, `linux-x64`, `linux-arm64`, `linux-musl-x64`,
+`linux-musl-arm64`, `osx-x64`, and `osx-arm64`. Follow the host mapping and
+platform toolchain prerequisites in the README. Musl builds run in Alpine
+containers on matching-architecture glibc Linux hosts. Their smoke tests run
+in Alpine even though the orchestration host uses glibc. Other executable smoke
+tests run when the target RID matches the host RID; cross-compiled Windows and
+macOS ARM64 packages report an explicit skip.
 
 ## Versioning
 

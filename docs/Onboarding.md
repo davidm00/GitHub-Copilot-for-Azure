@@ -52,7 +52,9 @@ Each plugin has the following files under the `plugins/<plugin>` directory:
 ├──   assets/               (assets, referenced by Cursor plugin manifest)
 ├──   hooks/                (hook files)
 ├──   skills/               (skill files)
-├──   .mcp.json             (mcp definition)
+├──   plugin.json           (Agent Plugins 1.0 manifest)
+├──   mcp.json              (portable MCP definition)
+├──   .mcp.json             (legacy MCP definition)
 ├──   LICENSE               (your plugin LICENSE)
 ├──   README.md             (user facing README.md for your plugin)
 ├──   version.json          (base version file)
@@ -60,11 +62,33 @@ Each plugin has the following files under the `plugins/<plugin>` directory:
 
 Each plugin has all its files stored under `plugins/<your-plugin-name>/`, which is called the plugin root. `plugins/azure-skills/` is a well-established plugin you can use as an example.
 
+Root `plugin.json` and `mcp.json` target
+[Agent Plugins 1.0.0](https://agent-plugins.org/specification). Each includes
+its canonical versioned `$schema` URL. The manifest contains metadata only;
+skills and MCP servers are discovered from `skills/` and `mcp.json`.
+Keep portable metadata and MCP servers synchronized with the legacy files.
+Portable MCP servers require an explicit transport: `stdio` for local
+executables or `streamable-http` for HTTP servers. Keep legacy transport
+syntax in `.mcp.json`. See [plugin-manifest.md](./plugin-manifest.md).
+
 `.claude-plugin/` contains the plugin manifest for Claude Code. `.cursor-plugin/` contains the plugin manifest for Cursor. `.plugin/` contains the plugin manifest for Copilot CLI and VS Code. We have to maintain separate plugin manifests because clients use them in different ways. See [plugin-manifest.md](./plugin-manifest.md) for more information. Every new plugin should provide at least these manifests to make sure it works for these clients.
 
-`hooks/` contains the hooks manifest. Since clients also use hook manifests in different ways, we have to maintain separate hook manifests for different clients. See [hooks.md](./hooks.md) for more information. Our existing hooks for tracking telemetry are reusable. If you do not want our hook to collect telemetry for your skill, or if you want to do something differently, you can implement your own. If you do so, please read [hooks.md](./hooks.md) to help make your hook work for the clients.
+`hooks/` contains plugin-owned hook manifests and scripts. Since clients also use hook manifests in different ways, we have to maintain separate hook manifests for different clients. See [hooks.md](./hooks.md) for more information. Our existing hooks for tracking telemetry are reusable. They install the pinned native `ghcfa-telem` reporter, verify downloaded release assets before extraction, and cache the executable for reuse. If you do not want our hook to collect telemetry for your skill, or if you want to do something differently, you can implement your own. If you do so, please read [hooks.md](./hooks.md) to help make your hook work for the clients. The build automatically combines
+these files with the shared telemetry hooks under the repository-level
+`hooks/` directory. Every plugin provides
+`hooks/scripts/pluginPathAllowPattern.sh` and
+`hooks/scripts/pluginPathAllowPattern.ps1` for its own installation paths.
+Optional `copilot-hooks.json`, `claude-hooks.json`, and `cursor-hooks.json`
+files are fragments: list only plugin-owned event registrations, and the build
+will append them to shared events or add new events. See
+[hooks.md](./hooks.md) for the client-specific formats and merge behavior.
 
-`skills/` contains the skill files. The `.mcp.json` file contains the MCP server configuration you want to add to the agent. Skills and MCP configuration are the bread and butter added to the agent context to help the agent solve problems. `LICENSE` is the software license for your plugin. `README.md` is user-facing documentation for users of the plugin. `version.json` sets the base major and minor version numbers so the automated versioning script can generate version numbers for your plugin. See [VERSIONING.md](./VERSIONING.md) to learn how it works.
+The build copies compiled `hooks/copilot-hooks.json` unchanged to
+`com.github.copilot/hooks/hooks.json` for Copilot's Agent Plugins extension.
+This generated manifest uses the same scripts under `hooks/scripts/`;
+do not maintain a second source manifest or duplicate those scripts.
+
+`skills/` contains the skill files. The `.mcp.json` file contains the MCP server configuration you want to add to the agent. Skills and MCP configuration are the bread and butter added to the agent context to help the agent solve problems. `LICENSE` is the software license for your plugin. `README.md` is user-facing documentation for users of the plugin. Preserve the scaffolded telemetry disclosure when completing the README. Add an `npx` and `.npmrc` security warning only when the plugin's actual MCP configuration invokes `npx`; the shared telemetry hook does not use it. `version.json` sets the base major and minor version numbers so the automated versioning script can generate version numbers for your plugin. See [VERSIONING.md](./VERSIONING.md) to learn how it works.
 
 Unless there is an urgent need to extend an existing plugin, new skills should be contributed as new plugins so they can work independently from existing ones.
 
@@ -107,6 +131,21 @@ npm run build
 ```
 
 The `output/` directory now contains the fully built plugin, ready for use.
+
+Each built plugin also includes `allowed-skills.txt` and
+`allowed-references.txt` under `hooks/allowlists/`. These generated UTF-8 files contain sorted,
+newline-separated entries for telemetry allowlists. Reference paths are relative
+to the plugin's `skills/` directory and use backslashes, such as
+`azure-deploy\references\workflow.md`. They include supporting scripts and assets,
+but exclude `SKILL.md`, `version.json`, and license files named `LICENSE`,
+`LICENSE.txt`, or `LICENSE.md`. The build regenerates these files from packaged
+skills; do not maintain them in plugin source directories.
+
+The same directory also contains `allowed-tools.json`, copied byte-for-byte from
+the shared `plugins/allowed-azure-tools.json` source. Unlike the text lists, it
+retains grouped JSON with `commands`, `areas`, and `extensionTools` sections.
+An unreadable source or unwritable destination fails the build. Packaging these
+three files does not yet change the telemetry hooks to pass them to the reporter.
 
 ### Token Management
 

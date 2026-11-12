@@ -1,6 +1,6 @@
 #!/usr/bin/env pwsh
 #Requires -Version 7
-# Validates all downloaded nightly runtime and symbol archives against their SHA-256 sidecars and writes the consolidated build manifest published by the pipeline.
+# Validates all downloaded runtime and symbol archives against their SHA-256 sidecars and writes the consolidated build manifest published by the pipeline.
 # Exit codes: 0 = success, 1 = artifact validation failed, 2 = invalid arguments.
 
 [CmdletBinding()]
@@ -8,16 +8,19 @@ param(
     [string] $PipelineWorkspace,
     [string] $ManifestPath,
     [string] $BuildId,
+    [string] $BuildReason,
     [string] $SourceVersion
 )
 
 Set-StrictMode -Version Latest
+Import-Module (Join-Path $PSScriptRoot 'NativePackaging.psm1') -Force -ErrorAction Stop
 
 if ([string]::IsNullOrWhiteSpace($PipelineWorkspace) -or
     [string]::IsNullOrWhiteSpace($ManifestPath) -or
     [string]::IsNullOrWhiteSpace($BuildId) -or
+    [string]::IsNullOrWhiteSpace($BuildReason) -or
     [string]::IsNullOrWhiteSpace($SourceVersion)) {
-    Write-Error 'PipelineWorkspace, ManifestPath, BuildId, and SourceVersion are required.'
+    Write-Error 'PipelineWorkspace, ManifestPath, BuildId, BuildReason, and SourceVersion are required.'
     exit 2
 }
 if (-not (Test-Path -LiteralPath $PipelineWorkspace -PathType Container)) {
@@ -25,14 +28,7 @@ if (-not (Test-Path -LiteralPath $PipelineWorkspace -PathType Container)) {
     exit 2
 }
 
-$runtimeIdentifiers = @(
-    'win-x64',
-    'win-arm64',
-    'osx-x64',
-    'osx-arm64',
-    'linux-x64',
-    'linux-arm64'
-)
+$runtimeIdentifiers = @(Get-NativeRuntimeIdentifierList)
 $manifestFiles = @()
 $versions = @()
 
@@ -44,33 +40,13 @@ try {
         }
 
         $runtimeArchives = @(
-            Get-ChildItem -LiteralPath $artifactDirectory -File -Filter "ghcfa-telem-*-$runtimeIdentifier.zip"
+            Get-ChildItem -LiteralPath $artifactDirectory -File -Filter "ghcfa-telem-*-$runtimeIdentifier.zip" -ErrorAction Stop
         )
         $symbolArchives = @(
-            Get-ChildItem -LiteralPath $artifactDirectory -File -Filter "ghcfa-telem-*-$runtimeIdentifier-symbols.zip"
+            Get-ChildItem -LiteralPath $artifactDirectory -File -Filter "ghcfa-telem-*-$runtimeIdentifier-symbols.zip" -ErrorAction Stop
         )
         if ($runtimeArchives.Count -ne 1 -or $symbolArchives.Count -ne 1) {
             throw "Expected one runtime and one symbols archive for '$runtimeIdentifier'."
-        }
-
-        foreach ($archive in @($runtimeArchives[0], $symbolArchives[0])) {
-            $checksumPath = "$($archive.FullName).sha256"
-            if (-not (Test-Path -LiteralPath $checksumPath -PathType Leaf)) {
-                throw "Checksum file '$checksumPath' is missing."
-            }
-
-            $checksumLine = (Get-Content -LiteralPath $checksumPath -Raw -ErrorAction Stop).Trim()
-            $expectedHash = ($checksumLine -split '\s+', 2)[0]
-            $actualHash = (Get-FileHash -LiteralPath $archive.FullName -Algorithm SHA256 -ErrorAction Stop).Hash.ToLowerInvariant()
-            if ($actualHash -ne $expectedHash.ToLowerInvariant()) {
-                throw "Checksum validation failed for '$($archive.Name)'."
-            }
-
-            $manifestFiles += [ordered]@{
-                runtimeIdentifier = $runtimeIdentifier
-                file = $archive.Name
-                sha256 = $actualHash
-            }
         }
 
         $versionMatch = [regex]::Match(
@@ -80,7 +56,21 @@ try {
         if (-not $versionMatch.Success) {
             throw "Unable to parse the version from '$($runtimeArchives[0].Name)'."
         }
-        $versions += $versionMatch.Groups[1].Value
+        $version = $versionMatch.Groups[1].Value
+        if ($symbolArchives[0].Name -ne "ghcfa-telem-$version-$runtimeIdentifier-symbols.zip") {
+            throw "Runtime and symbols package versions do not match for '$runtimeIdentifier'."
+        }
+        $versions += $version
+
+        foreach ($archive in @($runtimeArchives[0], $symbolArchives[0])) {
+            $package = Get-ValidatedNativePackage -ArchivePath $archive.FullName `
+                -RuntimeIdentifier $runtimeIdentifier -Symbols:($archive -eq $symbolArchives[0])
+            $manifestFiles += [ordered]@{
+                runtimeIdentifier = $runtimeIdentifier
+                file = $package.File
+                sha256 = $package.Sha256
+            }
+        }
     }
 
     $uniqueVersions = @($versions | Sort-Object -Unique)
@@ -92,8 +82,10 @@ try {
     New-Item -ItemType Directory -Path $manifestDirectory -Force -ErrorAction Stop | Out-Null
     [ordered]@{
         buildId = $BuildId
+        buildReason = $BuildReason
         sourceVersion = $SourceVersion
         version = $uniqueVersions[0]
+        releaseTag = "ghcfa-telem-$($uniqueVersions[0])"
         runtimeIdentifiers = $runtimeIdentifiers
         files = $manifestFiles
     } |

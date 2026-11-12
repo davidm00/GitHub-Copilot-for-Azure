@@ -9,10 +9,11 @@
 
 ## Telemetry
 
-The `track-telemetry` hook script uses `npx` to download and run Azure MCP to
-collect telemetry for usage of skills and MCP tools from this plugin. To opt
-out of telemetry collection, set `AZURE_MCP_COLLECT_TELEMETRY=false` in the
-environment of the process running the agent.
+The `track-telemetry` hook installs a pinned native `ghcfa-telem` release asset
+when needed, verifies its platform-specific SHA-256 digest before extraction,
+and caches the executable for reuse. To opt out of telemetry collection, set
+`AZURE_MCP_COLLECT_TELEMETRY=false` in the environment of the process running
+the agent.
 
 ## Setup
 
@@ -22,7 +23,7 @@ Sign up at [azure.microsoft.com](https://azure.microsoft.com) or use your existi
 
 ### 2. Install Node.js and NPM
 
-The Azure MCP Server runs as an NPM package. Ensure you have Node.js 18 or later installed:
+The Azure MCP Server runs as an NPM package. Ensure you have Node.js 22 or later installed:
 
 - Download from [nodejs.org](https://nodejs.org)
 - Or use a version manager like [nvm](https://github.com/nvm-sh/nvm)
@@ -132,7 +133,6 @@ For more information, visit:
 - See the [Authentication guide](https://learn.microsoft.com/azure/developer/azure-mcp-server/)
 
 ### Server Issues
-- Ensure Node.js 18 or later is installed
+- Ensure Node.js 22 or later is installed
 - Verify NPM can download packages from npmjs.com
 - Check the [Troubleshooting guide](https://github.com/microsoft/mcp/blob/main/servers/Azure.Mcp.Server/TROUBLESHOOTING.md)
-

@@ -2,8 +2,115 @@
 
 `ghcfa-telem` is a stripped-down .NET implementation of the Azure MCP
 `server plugin-telemetry` command. It produces an executable named
-`ghcfa-telem` and consumes pinned Azure MCP allowlist resources from
-`resources\`.
+`ghcfa-telem`. All telemetry allowlists are supplied as external files; the
+executable includes no embedded skill, reference, or tool lists.
+
+## File-based allowlists
+
+All invocations reporting an event require these three arguments:
+
+| Argument | Allowed telemetry values |
+|---|---|
+| `--allowed-skills <path>` | Skill names in newline-separated text |
+| `--allowed-references <path>` | Reference-file paths in newline-separated text |
+| `--allowed-tools <path>` | Commands, areas, and extension tools in grouped JSON |
+
+Skills and references files are UTF-8 text with one name or reference path per
+line. A UTF-8 BOM, LF or CRLF line endings, duplicate entries, blank lines, and
+`#` comment lines are supported. Surrounding whitespace is trimmed; comments
+must start with `#` after trimming. An empty or comment-only skills or references
+file allows no values in that category.
+
+The tools file is a UTF-8 JSON object with three required top-level sections:
+`commands`, `areas`, and `extensionTools`. Each section maps arbitrary entry
+names (for example, the Azure MCP version that introduced the names) to
+non-empty arrays of command, area, or extension-tool names:
+
+```json
+{
+  "commands": {
+    "Initial": ["subscription_list", "group_resource_list"],
+    "1.0.1": ["custom_command"]
+  },
+  "areas": {
+    "Initial": ["storage", "pricing"],
+    "Next release": ["custom_area"]
+  },
+  "extensionTools": {
+    "Azure extension": ["azure_auth-set_auth_context"]
+  }
+}
+```
+
+Names are combined across all entries within each section; duplicate names are
+allowed. Entry names are descriptive labels only, not versions to compare or
+tool names to allow. The three sections remain distinct. An empty section
+(`{}`) allows no names in that category. All three empty sections deny all tool
+names. Missing, unknown, or duplicate top-level sections, invalid JSON, empty
+entry arrays, and non-string or blank names are rejected. The tools file does
+not accept the newline-separated format or `#` comments.
+
+Every file is read before event validation, even if the event has no value
+for that category. Required options do not imply non-empty lists. An omitted
+argument, missing or unreadable file, invalid file path, or malformed tools
+file produces a JSON error response with status `400` and process exit code
+`1`; no telemetry is published and there is no fallback. Standalone `--help`
+and `-h` do not require allowlist paths.
+
+Matching remains case-sensitive. Reference entries and reported reference paths
+are normalized for comparison so `/` and `\` separators are interchangeable,
+including mixed separators, regardless of the host operating system. No other
+path resolution is performed, and the reported path is unchanged in telemetry.
+List canonical MCP command and area names without client prefixes (for example,
+`subscription_list` in `commands` or `storage` in `areas`);
+the reporter continues stripping `azure-`, `mcp_azure_mcp_`, and
+`mcp__plugin_azure_azure__` from incoming tool names. Exact tool names such as
+`azure_auth-set_auth_context` belong in `extensionTools` and are matched verbatim.
+
+Paths to the allowlist files can be absolute or relative to the current working
+directory. Both `--option <path>` and `--option=<path>` are accepted. Paths to
+these configuration files are not included in telemetry properties.
+
+From a directory containing the executable and the list files, in PowerShell:
+
+```powershell
+.\ghcfa-telem.exe --timestamp "2026-10-27T00:00:00Z" `
+  --event-type skill_invocation --session-id "session-1" `
+  --skill-name "custom-skill" `
+  --allowed-skills ".\allowed-skills.txt" `
+  --allowed-references ".\allowed-references.txt" `
+  --allowed-tools ".\allowed-tools.json"
+```
+
+In Bash:
+
+```bash
+./ghcfa-telem --timestamp "2026-10-27T00:00:00Z" \
+  --event-type skill_invocation --session-id "session-1" \
+  --skill-name "custom-skill" \
+  --allowed-skills "./allowed-skills.txt" \
+  --allowed-references "./allowed-references.txt" \
+  --allowed-tools "./allowed-tools.json"
+```
+
+The skills file in this example must contain `custom-skill`. The plugin build
+packages these files under `hooks/allowlists/`, and both shared telemetry hooks
+pass their installed paths for every reported event. Other callers must also
+supply all three paths.
+
+## Allowlist maintenance
+
+The plugin build generates skill and reference text files from each plugin's
+sources and copies `plugins/allowed-azure-tools.json` unchanged alongside them.
+The [Azure MCP allowlist refresh workflow](../.github/workflows/refresh-azure-mcp-allowlist.yml)
+maintains that shared tools file, including its captured extension-helper
+baseline. See [Azure MCP tool allowlists](../docs/azure-mcp-allowlists.md).
+
+The former embedded-resource synchronization workflow is retired. Allowlist
+updates now reach the reporter with the packaged plugin files, without
+rebuilding or releasing the reporter. `CompatibilityConstants.AzureMcpCommit`
+still identifies the source revision for the copied runtime behavior, not
+the current tool allowlist.
 
 ## Telemetry policy
 
@@ -31,28 +138,40 @@ calculates the executable and library versions from `version.json`. The
 starting major and minor version is `0.1`, and `pathFilters: ["."]` limits
 version-height changes to commits that modify this directory.
 
+Telemetry reports the reporter's full NBGV informational version, including
+commit metadata, in the event's `Version` property, the OpenTelemetry
+`service.version` resource attribute, and the activity-source version.
+The event's `McpServerNameV2` property identifies the executable as `ghcfa-telem`.
+The activity-source name remains `Azure.Mcp.Server`, and the OpenTelemetry
+service name remains `azmcp`.
+`CompatibilityConstants.AzureMcpCommit` separately pins the Azure MCP source
+revision used for implementation compatibility.
+
 ## Native AOT builds
 
-Native AOT publishing is opt-in and supports the same operating system and
-architecture matrix as Azure MCP:
+Native AOT publishing is opt-in and supports Azure MCP's standard operating
+system and architecture matrix, plus two musl Linux targets:
 
 | Build host | Target RIDs | Smoke tests |
 |---|---|---|
 | Windows x64 | `win-x64`, `win-arm64` | `win-x64` only |
-| Linux x64 | `linux-x64` | `linux-x64` |
-| Linux ARM64 | `linux-arm64` | `linux-arm64` |
+| glibc Linux x64 | `linux-x64`, `linux-musl-x64` | Both; musl runs in Alpine |
+| glibc Linux ARM64 | `linux-arm64`, `linux-musl-arm64` | Both; musl runs in Alpine |
 | macOS x64 | `osx-x64`, `osx-arm64` | `osx-x64` only |
 
 Native AOT supports cross-architecture publishing within an operating system,
 but not cross-operating-system publishing. The build script follows Azure
 MCP's host topology: Windows and macOS ARM64 artifacts are cross-compiled on
-x64 hosts, while Linux ARM64 builds run on an ARM64 host.
+x64 hosts, while Linux ARM64 builds run on an ARM64 host. Musl targets are
+compiled inside matching-architecture Alpine containers, not cross-linked
+against the glibc host's libraries. Cross-architecture emulation is not
+supported.
 
 ### Prerequisites
 
 All platforms require:
 
-- .NET 10 SDK
+- .NET 10 SDK (provided by the Alpine build image for musl targets)
 - PowerShell 7 or later
 
 Platform-specific prerequisites:
@@ -61,8 +180,18 @@ Platform-specific prerequisites:
   Windows SDK, and the MSVC x64/x86 build tools. Building `win-arm64` also
   requires the MSVC ARM64 build tools.
 - Linux: `clang`, `binutils` (including `objcopy`), and zlib development
-  headers for the target architecture. Run `linux-arm64` builds on an ARM64
-  host.
+  headers for glibc targets. Run ARM64 builds on an ARM64 host.
+- Musl Linux: a glibc Linux host with PowerShell 7 and a running Linux Docker
+  engine of the same architecture. Use a full clone with `.git` inside the
+  checkout, rather than a linked worktree, so NBGV can read the complete
+  history inside the container. The
+  [toolchain Dockerfile](eng/native-musl/Dockerfile) uses the exact .NET SDK
+  version from `global.json` on Alpine 3.24 when invoked by the build script.
+  Direct Docker builds without an SDK build argument default to the floating
+  `10.0` SDK tag. The image installs `clang`, `build-base`,
+  `musl-dev`, `binutils`, and `zlib-dev`. The resulting binaries target
+  Alpine 3.24 or compatible newer musl environments. No Alpine PowerShell
+  installation is required.
 - macOS: Xcode command-line tools and the macOS SDK. An x64 host can publish
   both `osx-x64` and `osx-arm64`.
 
@@ -80,7 +209,7 @@ The script:
 2. Locates and initializes the platform-native compiler and linker toolchain.
 3. Publishes the console app with `BuildNative=true`.
 4. Runs the native executable through success and validation-error smoke tests
-   when the target RID matches the host RID.
+   when the target RID matches the host RID, or inside Alpine for musl targets.
 5. Creates separate runtime and symbols packages with SHA-256 sidecars.
 
 Specify the target RID on each host:
@@ -101,6 +230,37 @@ pwsh ./eng/scripts/Build-Native.ps1 -RuntimeIdentifier osx-arm64
 
 The Linux commands must be run on the matching architecture. The script rejects
 unsupported host/target combinations.
+
+For musl targets, run from `telemetry-reporter` on the matching glibc Linux
+host. In Bash:
+
+```bash
+# x64 host
+pwsh ./eng/scripts/Build-Native.ps1 -RuntimeIdentifier linux-musl-x64 -RestoreConfigFile ./nuget.public.config
+# ARM64 host
+pwsh ./eng/scripts/Build-Native.ps1 -RuntimeIdentifier linux-musl-arm64 -RestoreConfigFile ./nuget.public.config
+```
+
+In PowerShell on those Linux hosts:
+
+```powershell
+./eng/scripts/Build-Native.ps1 -RuntimeIdentifier linux-musl-x64 -RestoreConfigFile ./nuget.public.config
+./eng/scripts/Build-Native.ps1 -RuntimeIdentifier linux-musl-arm64 -RestoreConfigFile ./nuget.public.config
+```
+
+The script builds the toolchain image locally unless `-MuslBuildImage` supplies
+an image built from the same Dockerfile and SDK version. It checks the container
+RID and compiles, links, executes, and extracts symbols from a musl/zlib probe
+before publishing. Official CI builds the toolchain image with the 1ES container
+task and uses the existing Azure SDK NuGet feed. Its `NuGetAuthenticate` access
+token is forwarded through a temporary, feed-scoped environment variable, not
+command-line credentials or a credential file. This permits restoring musl
+packages that have not yet been cached by the feed. Public GitHub CI and the
+local examples explicitly select [nuget.public.config](nuget.public.config)
+instead; official builds never fall back to nuget.org.
+
+Musl executable smoke tests run in the matching Alpine `runtime-deps` image,
+without the SDK or compiler libraries. All executions disable telemetry.
 
 Use `-NoClean` to skip `dotnet clean`, or select a different artifact root:
 
@@ -198,12 +358,18 @@ artifact does not send telemetry. Cross-compiled `win-arm64` and `osx-arm64`
 artifacts cannot run on their x64 build hosts, so the script explicitly reports
 their smoke tests as skipped.
 
-## Nightly Azure DevOps builds
+## Nightly builds
+
+The [GitHub Actions workflow](../.github/workflows/telemetry-reporter-build.yml)
+also builds both musl targets on native Linux x64 and ARM64 runners for pull
+requests. It runs the same packaging and executable
+smoke tests, and uploads verified runtime and symbols packages without creating
+a release.
 
 The Azure DevOps pipeline defined in
 [`pipelines/telemetry-reporter-nightly.yml`](../pipelines/telemetry-reporter-nightly.yml)
 runs nightly in the `azure-sdk/internal` project. It uses the 1ES official
-pipeline template and Azure SDK build pools to produce all six supported Native
+pipeline template and Azure SDK build pools to produce all eight supported Native
 AOT packages:
 
 [Open the telemetry reporter nightly pipeline](https://dev.azure.com/azure-sdk/internal/_build?definitionId=8402).
@@ -211,20 +377,41 @@ AOT packages:
 - `win-x64` and `win-arm64`
 - `osx-x64` and `osx-arm64`
 - `linux-x64` and `linux-arm64`
+- `linux-musl-x64` and `linux-musl-arm64`
 
 Scheduled runs compare `main` with the previous scheduled build that succeeded
 or succeeded with warnings, and skip the platform matrix when no
 executable-affecting telemetry reporter files changed. Manual runs always build
-the complete matrix.
+and verify the complete matrix.
 
 Each target publishes a `telemetry-reporter_<rid>` pipeline artifact containing
 the runtime ZIP, symbols ZIP, and their SHA-256 sidecars. A final
 `telemetry-reporter_manifest` artifact records and verifies the complete
-six-target build.
+eight-target build, including the source build ID, run reason, source commit, and
+release tag.
+
+## GitHub releases
+
+Queue
+[`pipelines/telemetry-reporter-nightly.yml`](../pipelines/telemetry-reporter-nightly.yml)
+manually from `main` to create a release. The manual run builds and verifies the
+complete matrix, then waits for authorized approval through the protected
+`package-publish` Azure DevOps environment before retaining itself and
+publishing those same artifacts. This keeps the release commit and packages
+within one pipeline run.
+
+It creates a normal
+[GitHub release](https://github.com/microsoft/GitHub-Copilot-for-Azure/releases)
+tagged `ghcfa-telem-<version>` and titled `ghcfa-telem <version>`. The release
+targets the manual run's source commit, is marked Latest, and contains the eight
+runtime ZIPs. Symbols, checksums, build information, and the manifest remain
+available from the retained release run.
 
 Pipeline restores use the Azure SDK public NuGet feed instead of direct
 `nuget.org` access, keeping dependency acquisition within the 1ES network
 boundary.
 
-Musl-based Linux packages are tracked separately and are not produced by this
-pipeline.
+Runtime archives are checked for executable presence and symbol exclusion.
+Symbols archives must contain the platform's native debug artifact and no
+runtime files. Release validation checks both archive types against the
+manifest and their SHA-256 sidecars before uploading the runtime assets.

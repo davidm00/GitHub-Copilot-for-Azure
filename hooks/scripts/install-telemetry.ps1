@@ -10,6 +10,9 @@ param(
     [string] $Version
 )
 
+$toolName = 'ghcfa-telem'
+$checksumManifestPath = Join-Path $PSScriptRoot 'telemetry-reporter-checksums.txt'
+
 # Writes an installer failure to the error stream without terminating the script.
 function Write-InstallerError {
     param([string] $Message)
@@ -28,6 +31,7 @@ function Get-TelemetryTarget {
         $operatingSystem = 'osx'
     }
     elseif ($runtime::IsOSPlatform($platform::Linux)) {
+        $operatingSystem = 'linux'
         $isMusl = Test-Path -LiteralPath '/etc/alpine-release' -PathType Leaf
 
         if (-not $isMusl -and (Test-Path -LiteralPath '/etc/os-release' -PathType Leaf)) {
@@ -54,10 +58,8 @@ function Get-TelemetryTarget {
         }
 
         if ($isMusl) {
-            throw 'The standalone telemetry reporter does not yet support Alpine or musl Linux.'
+            $operatingSystem = 'linux-musl'
         }
-
-        $operatingSystem = 'linux'
     }
     else {
         throw "Unsupported operating system: $($runtime::OSDescription)"
@@ -73,7 +75,7 @@ function Get-TelemetryTarget {
         OperatingSystem = $operatingSystem
         Architecture = $architecture
         RuntimeIdentifier = "$operatingSystem-$architecture"
-        BinaryName = $(if ($operatingSystem -eq 'win') { 'ghcfa-telem.exe' } else { 'ghcfa-telem' })
+        BinaryName = $(if ($operatingSystem -eq 'win') { "${toolName}.exe" } else { $toolName })
     }
 }
 
@@ -101,6 +103,65 @@ function Get-TelemetryCacheRoot {
     return Join-Path $env:HOME '.cache/github-copilot-for-azure/telemetry'
 }
 
+# Resolves the one pinned release digest for a telemetry reporter version and runtime.
+function Get-ExpectedTelemetryArchiveHash {
+    param(
+        [string] $ManifestPath,
+        [string] $ReporterVersion,
+        [string] $RuntimeIdentifier
+    )
+
+    if (-not (Test-Path -LiteralPath $ManifestPath -PathType Leaf)) {
+        throw "Telemetry checksum manifest not found: $ManifestPath"
+    }
+
+    $matchingHashes = @()
+    $lineNumber = 0
+    foreach ($line in [System.IO.File]::ReadAllLines($ManifestPath)) {
+        $lineNumber++
+        $trimmed = $line.Trim()
+        if ([string]::IsNullOrWhiteSpace($trimmed) -or $trimmed.StartsWith('#')) {
+            continue
+        }
+
+        $parts = @($trimmed -split '\s+')
+        if ($parts.Count -ne 3 -or
+            $parts[0] -notmatch '^[0-9A-Za-z][0-9A-Za-z.+-]*$' -or
+            $parts[1] -notmatch '^(win|osx|linux|linux-musl)-(x64|arm64)$' -or
+            $parts[2] -notmatch '^[0-9a-fA-F]{64}$') {
+            throw "Telemetry checksum manifest has a malformed entry on line $lineNumber."
+        }
+        if ($parts[0] -eq $ReporterVersion -and $parts[1] -eq $RuntimeIdentifier) {
+            $matchingHashes += $parts[2].ToLowerInvariant()
+        }
+    }
+
+    if ($matchingHashes.Count -eq 0) {
+        throw "Telemetry checksum manifest has no entry for version $ReporterVersion and runtime $RuntimeIdentifier."
+    }
+    if ($matchingHashes.Count -gt 1) {
+        throw "Telemetry checksum manifest has multiple entries for version $ReporterVersion and runtime $RuntimeIdentifier."
+    }
+
+    return $matchingHashes[0]
+}
+
+# Computes a lowercase SHA-256 digest without depending on module auto-loading.
+function Get-TelemetryArchiveHash {
+    param([string] $ArchivePath)
+
+    $stream = [System.IO.File]::OpenRead($ArchivePath)
+    $algorithm = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $hashBytes = $algorithm.ComputeHash($stream)
+        return ([System.BitConverter]::ToString($hashBytes)).Replace('-', '').ToLowerInvariant()
+    }
+    finally {
+        $algorithm.Dispose()
+        $stream.Dispose()
+    }
+}
+
 if ([string]::IsNullOrWhiteSpace($Version)) {
     Write-InstallerError 'The -Version parameter is required.'
     exit 2
@@ -126,9 +187,9 @@ try {
 
     $temporaryDirectory = Join-Path `
         ([System.IO.Path]::GetTempPath()) `
-        "ghcfa-telem-$([guid]::NewGuid().ToString('N'))"
+        "${toolName}-$([guid]::NewGuid().ToString('N'))"
     $extractDirectory = Join-Path $temporaryDirectory 'extracted'
-    $assetName = "ghcfa-telem-$Version-$($target.RuntimeIdentifier).zip"
+    $assetName = "${toolName}-$Version-$($target.RuntimeIdentifier).zip"
     $archivePath = Join-Path $temporaryDirectory $assetName
 
     New-Item -ItemType Directory -Path $extractDirectory -Force -ErrorAction Stop | Out-Null
@@ -143,12 +204,20 @@ try {
             -ErrorAction Stop
     }
     else {
-        $downloadUrl = "https://github.com/microsoft/GitHub-Copilot-for-Azure/releases/download/$Version/$assetName"
+        $downloadUrl = "https://github.com/microsoft/GitHub-Copilot-for-Azure/releases/download/${toolName}-$Version/$assetName"
+        $expectedArchiveHash = Get-ExpectedTelemetryArchiveHash `
+            -ManifestPath $checksumManifestPath `
+            -ReporterVersion $Version `
+            -RuntimeIdentifier $target.RuntimeIdentifier
         Invoke-WebRequest `
             -Uri $downloadUrl `
             -OutFile $archivePath `
             -UseBasicParsing `
             -ErrorAction Stop
+        $actualArchiveHash = Get-TelemetryArchiveHash -ArchivePath $archivePath
+        if ($actualArchiveHash -ne $expectedArchiveHash) {
+            throw "SHA-256 validation failed for telemetry reporter asset $assetName."
+        }
     }
 
     Expand-Archive `

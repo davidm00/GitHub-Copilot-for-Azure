@@ -6,28 +6,12 @@ namespace Ghcfa.Telemetry.Tests.Validation;
 /// <summary>
 /// Contains tests for telemetry event validation.
 /// </summary>
-public sealed class PluginTelemetryValidatorTests
+public sealed class PluginTelemetryValidatorTests : IDisposable
 {
-    private readonly PluginTelemetryValidator _validator =
-        new(PluginTelemetryAllowlist.LoadEmbedded());
+    private readonly PluginTelemetryValidator _validator = new();
+    private readonly TemporaryAllowlists _files = new();
 
-    [Fact]
-    public void EmbeddedToolSnapshot_MatchesPinnedAzureMcpRegistrySize()
-    {
-        var assembly = typeof(PluginTelemetryAllowlist).Assembly;
-
-        var commands = PluginTelemetryAllowlist.LoadArray(
-            assembly,
-            "allowed-tool-names.json",
-            "commands");
-        var areas = PluginTelemetryAllowlist.LoadArray(
-            assembly,
-            "allowed-tool-names.json",
-            "areas");
-
-        Assert.Equal(419, commands.Count);
-        Assert.Equal(66, areas.Count);
-    }
+    public void Dispose() => _files.Dispose();
 
     [Theory]
     [InlineData("mcp__plugin_azure_azure__pricing", "pricing")]
@@ -40,7 +24,9 @@ public sealed class PluginTelemetryValidatorTests
         string toolName,
         string expected)
     {
-        Assert.Equal(expected, _validator.ValidateAndNormalizeToolName(toolName));
+        var options = CreateOptions(toolName: toolName);
+        Assert.True(_validator.ValidateAndNormalize(options).IsValid);
+        Assert.Equal(expected, options.ToolName);
     }
 
     [Theory]
@@ -51,17 +37,19 @@ public sealed class PluginTelemetryValidatorTests
         string toolName,
         string expected)
     {
-        Assert.Equal(expected, _validator.ValidateAndNormalizeToolName(toolName));
+        var options = CreateOptions(toolName: toolName);
+        Assert.True(_validator.ValidateAndNormalize(options).IsValid);
+        Assert.Equal(expected, options.ToolName);
     }
 
     [Theory]
     [InlineData("azure-fakeTool")]
     [InlineData("mcp_azure_documentation")]
     [InlineData("completely_unknown")]
-    [InlineData("")]
+    [InlineData("azure-")]
     public void ValidateAndNormalizeToolName_RejectsUnknownTools(string toolName)
     {
-        Assert.Null(_validator.ValidateAndNormalizeToolName(toolName));
+        Assert.False(_validator.ValidateAndNormalize(CreateOptions(toolName: toolName)).IsValid);
     }
 
     [Theory]
@@ -77,14 +65,7 @@ public sealed class PluginTelemetryValidatorTests
     [Fact]
     public void ValidateAndNormalize_RejectsUnknownSkill()
     {
-        var options = CreateOptions();
-        options = new PluginTelemetryOptions
-        {
-            Timestamp = options.Timestamp,
-            EventType = options.EventType,
-            SessionId = options.SessionId,
-            SkillName = "custom-skill"
-        };
+        var options = CreateOptions(skillName: "custom-skill");
 
         var result = _validator.ValidateAndNormalize(options);
 
@@ -97,13 +78,7 @@ public sealed class PluginTelemetryValidatorTests
     [Fact]
     public void ValidateAndNormalize_RejectsUnknownFileReference()
     {
-        var options = new PluginTelemetryOptions
-        {
-            Timestamp = "timestamp",
-            EventType = "event",
-            SessionId = "session",
-            FileReference = "custom\\file.md"
-        };
+        var options = CreateOptions(fileReference: "custom\\file.md");
 
         var result = _validator.ValidateAndNormalize(options);
 
@@ -116,15 +91,10 @@ public sealed class PluginTelemetryValidatorTests
     [Fact]
     public void ValidateAndNormalize_AcceptsKnownValuesAndNormalizesTool()
     {
-        var options = new PluginTelemetryOptions
-        {
-            Timestamp = "timestamp",
-            EventType = "event",
-            SessionId = "session",
-            SkillName = "azure-storage",
-            FileReference = "azure-ai\\references\\auth-best-practices.md",
-            ToolName = "azure-storage"
-        };
+        var options = CreateOptions(
+            skillName: "azure-storage",
+            fileReference: "azure-ai\\references\\auth-best-practices.md",
+            toolName: "azure-storage");
 
         var result = _validator.ValidateAndNormalize(options);
 
@@ -137,21 +107,121 @@ public sealed class PluginTelemetryValidatorTests
     [InlineData("Azure-Storage")]
     public void ValidateAndNormalize_IsCaseSensitive(string skillName)
     {
-        var options = new PluginTelemetryOptions
-        {
-            Timestamp = "timestamp",
-            EventType = "event",
-            SessionId = "session",
-            SkillName = skillName
-        };
+        var options = CreateOptions(skillName: skillName);
 
         Assert.False(_validator.ValidateAndNormalize(options).IsValid);
     }
 
-    private static PluginTelemetryOptions CreateOptions() => new()
+    [Theory]
+    [InlineData(true, false, false)]
+    [InlineData(false, true, false)]
+    [InlineData(false, false, true)]
+    [InlineData(true, true, true)]
+    public void ValidateAndNormalize_UsesEachConfiguredFile(bool skills, bool references, bool tools)
+    {
+        using var file = new TemporaryAllowlistFile("custom-skill\ncustom/reference.md\ncustom_tool");
+        using var toolFile = new TemporaryAllowlistFile("""
+            {"commands":{"Initial":["custom_tool"]},"areas":{},"extensionTools":{}}
+            """);
+        var options = CreateOptions(
+            skillName: skills ? "custom-skill" : "azure-storage",
+            fileReference: references ? "custom/reference.md" : "azure-ai\\references\\auth-best-practices.md",
+            toolName: tools ? "azure-custom_tool" : "azure-storage",
+            allowedSkills: skills ? file.Path : null,
+            allowedReferences: references ? file.Path : null,
+            allowedTools: tools ? toolFile.Path : null);
+
+        Assert.True(_validator.ValidateAndNormalize(options).IsValid);
+        Assert.Equal(tools ? "custom_tool" : "storage", options.ToolName);
+    }
+
+    [Theory]
+    [InlineData("custom_tool", "custom_tool")]
+    [InlineData("azure-custom_tool", "custom_tool")]
+    [InlineData("mcp_azure_mcp_custom_tool", "custom_tool")]
+    [InlineData("mcp__plugin_azure_azure__custom_tool", "custom_tool")]
+    [InlineData("azure-custom_area", "custom_area")]
+    [InlineData("mcp_azure_mcp_custom_area", "custom_area")]
+    [InlineData("mcp__plugin_azure_azure__custom_area", "custom_area")]
+    [InlineData("azure_auth-set_auth_context", "azure_auth-set_auth_context")]
+    public void ValidateAndNormalize_NormalizesAllowedTools(string toolName, string expected)
+    {
+        using var file = new TemporaryAllowlistFile("""
+            {
+              "commands": {"Initial": ["custom_tool"]},
+              "areas": {"1.0.1": ["custom_area"]},
+              "extensionTools": {"Azure extension": ["azure_auth-set_auth_context"]}
+            }
+            """);
+        var options = CreateOptions(toolName: toolName, allowedTools: file.Path);
+
+        Assert.True(_validator.ValidateAndNormalize(options).IsValid);
+        Assert.Equal(expected, options.ToolName);
+    }
+
+    [Theory]
+    [InlineData("azure-storage")]
+    [InlineData("mcp_azure_mcp_subscription_list")]
+    [InlineData("azure_auth-set_auth_context")]
+    [InlineData("CUSTOM_TOOL")]
+    [InlineData("mcp_azure_documentation")]
+    public void ValidateAndNormalize_RejectsToolsNotInOverride(string toolName)
+    {
+        using var file = new TemporaryAllowlistFile("""
+            {"commands":{"Initial":["custom_tool"]},"areas":{},"extensionTools":{}}
+            """);
+        var options = CreateOptions(toolName: toolName, allowedTools: file.Path);
+
+        Assert.False(_validator.ValidateAndNormalize(options).IsValid);
+    }
+
+    [Fact]
+    public void ValidateAndNormalize_DoesNotTreatCommandsOrAreasAsVerbatimExtensionTools()
+    {
+        using var file = new TemporaryAllowlistFile("""
+            {
+              "commands": {"Initial": ["azure-command"]},
+              "areas": {"Initial": ["azure-area"]},
+              "extensionTools": {"Initial": ["azure-helper"]}
+            }
+            """);
+
+        Assert.False(_validator.ValidateAndNormalize(
+            CreateOptions(toolName: "azure-command", allowedTools: file.Path)).IsValid);
+        Assert.False(_validator.ValidateAndNormalize(
+            CreateOptions(toolName: "azure-area", allowedTools: file.Path)).IsValid);
+        Assert.True(_validator.ValidateAndNormalize(
+            CreateOptions(toolName: "azure-helper", allowedTools: file.Path)).IsValid);
+    }
+
+    [Fact]
+    public void ValidateAndNormalize_RejectsSkillsAndReferencesExcludedByOverride()
+    {
+        using var file = new TemporaryAllowlistFile("custom-entry");
+
+        Assert.False(_validator.ValidateAndNormalize(CreateOptions(
+            skillName: "azure-storage", allowedSkills: file.Path)).IsValid);
+        Assert.False(_validator.ValidateAndNormalize(CreateOptions(
+            fileReference: "azure-ai\\references\\auth-best-practices.md",
+            allowedReferences: file.Path)).IsValid);
+    }
+
+    private PluginTelemetryOptions CreateOptions(
+        string? skillName = null,
+        string? fileReference = null,
+        string? toolName = null,
+        string? allowedSkills = null,
+        string? allowedReferences = null,
+        string? allowedTools = null) => new()
     {
         Timestamp = "timestamp",
         EventType = "event",
-        SessionId = "session"
+        SessionId = "session",
+        SkillName = skillName,
+        FileReference = fileReference,
+        ToolName = toolName,
+        AllowedSkills = allowedSkills ?? _files.Skills.Path,
+        AllowedReferences = allowedReferences ?? _files.References.Path,
+        AllowedTools = allowedTools ?? _files.Tools.Path
     };
 }

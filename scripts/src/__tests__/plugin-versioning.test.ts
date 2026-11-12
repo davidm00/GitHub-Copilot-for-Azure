@@ -36,14 +36,14 @@ function commit(message: string): void {
   runGit("commit", "--quiet", "-m", message);
 }
 
-function getVersionedCommits(): Array<{
+function getVersionedCommits(plugin = "test-plugin"): Array<{
   subject: string;
   majorMinor: string;
   relativeHeight: number;
 }> {
   const script = `
     const { getVersionedCommits } = require(${JSON.stringify(gulpfile)});
-    process.stdout.write(JSON.stringify(getVersionedCommits("test-plugin")));
+    process.stdout.write(JSON.stringify(getVersionedCommits(${JSON.stringify(plugin)})));
   `;
   const result = spawnSync(
     process.execPath,
@@ -146,4 +146,55 @@ describe("plugin version history", () => {
       },
     ]);
   });
+
+  it("applies shared hooks and the tool allowlist to every plugin and local hooks only to their owner", () => {
+    tempDir = mkdtempSync(path.join(tmpdir(), "plugin-versioning-"));
+    runGit("init", "--quiet", "--initial-branch=main");
+    runGit("config", "user.name", "Version Test");
+    runGit("config", "user.email", "version-test@example.com");
+
+    writeFileSync(path.join(tempDir, "README.md"), "test repository\n");
+    commit("initial commit");
+
+    for (const plugin of ["alpha", "beta"]) {
+      const pluginDir = path.join(tempDir, "plugins", plugin);
+      mkdirSync(pluginDir, { recursive: true });
+      writeFileSync(
+        path.join(pluginDir, "version.json"),
+        JSON.stringify({ version: "1.0", pathFilters: [".", ":/hooks"] }),
+      );
+      writeFileSync(path.join(pluginDir, "plugin.txt"), `${plugin}\n`);
+    }
+    commit("add plugin baselines");
+
+    const sharedHooksDir = path.join(tempDir, "hooks");
+    mkdirSync(sharedHooksDir);
+    writeFileSync(path.join(sharedHooksDir, "shared.sh"), "shared\n");
+    commit("change shared hook");
+
+    const allowlistPath = path.join(tempDir, "plugins", "allowed-azure-tools.json");
+    writeFileSync(allowlistPath, '{"commands":{},"areas":{},"extensionTools":{}}\n');
+    commit("add shared tool allowlist");
+    writeFileSync(allowlistPath, '{"commands":{"first":["subscription_list"]},"areas":{},"extensionTools":{}}\n');
+    commit("change shared tool allowlist only");
+
+    const alphaHooksDir = path.join(tempDir, "plugins", "alpha", "hooks");
+    mkdirSync(alphaHooksDir);
+    writeFileSync(path.join(alphaHooksDir, "alpha.sh"), "alpha\n");
+    commit("change alpha hook");
+
+    expect(getVersionedCommits("alpha").map(({ subject, relativeHeight }) => ({ subject, relativeHeight }))).toEqual([
+      { subject: "add plugin baselines", relativeHeight: 0 },
+      { subject: "change shared hook", relativeHeight: 1 },
+      { subject: "add shared tool allowlist", relativeHeight: 2 },
+      { subject: "change shared tool allowlist only", relativeHeight: 3 },
+      { subject: "change alpha hook", relativeHeight: 4 },
+    ]);
+    expect(getVersionedCommits("beta").map(({ subject, relativeHeight }) => ({ subject, relativeHeight }))).toEqual([
+      { subject: "add plugin baselines", relativeHeight: 0 },
+      { subject: "change shared hook", relativeHeight: 1 },
+      { subject: "add shared tool allowlist", relativeHeight: 2 },
+      { subject: "change shared tool allowlist only", relativeHeight: 3 },
+    ]);
+  }, 30_000);
 });
