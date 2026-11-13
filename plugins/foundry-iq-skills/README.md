@@ -1,8 +1,6 @@
 # Foundry IQ Skills
 
-Build grounded knowledge experiences with [Azure AI Search (Foundry IQ)](https://learn.microsoft.com/azure/search/agentic-retrieval-overview).
-
-This plugin helps GitHub Copilot CLI create and use Foundry IQ knowledge bases, using your existing Azure resources when possible.
+Diagnose Foundry IQ and Azure AI Search access and ingestion issues, and configure Azure AI Search and Foundry IQ with source-aware security and verified API guidance. Build and query entity graphs, topic graphs and ontologies over your documents.
 
 ## Telemetry
 
@@ -14,36 +12,30 @@ the agent.
 
 ## Skill
 
-- **foundry-iq**: Build, connect, query, and troubleshoot Foundry IQ knowledge experiences using supported Azure resources.
+- [`foundry-iq`](skills/foundry-iq/SKILL.md): Azure AI Search and Foundry IQ guidance, diagnosis and configuration, plus entity graphs, topic graphs, graph-backed grounding and ontologies.
 
 ## What it helps with
 
-- Create or reuse an Azure AI Search (Foundry IQ) service
-- Create a File knowledge source from local files
-- Create a knowledge source from Azure Blob Storage or Azure Data Lake Storage
-- Create a knowledge base and validate that its content is searchable
-- Query an existing knowledge base and return citations
-- Connect an existing knowledge base to an agent
-- Diagnose knowledge base failures and unsupported requests
-- Prepare a cleanup plan for resources created by the workflow
-
-The skill is intended for Foundry IQ knowledge-base workflows. It does not support classic Azure AI Search (Foundry IQ) application, index, or query development, generic agent creation, or repository-file search.
+- Diagnose Azure AI Search and Foundry IQ access, connectivity, ingestion and freshness failures
+- Configure search, indexes, queries and knowledge sources using official Azure AI Search documentation and verified API versions
+- Keep caller, search service identity and end-user authorization distinct for protected content
+- Build and query entity knowledge graphs, topic graphs and graph-backed grounding passages over your documents
+- Draft, version, validate and export ontologies
+- Run a guided Foundry IQ graph demo
 
 ## Prerequisites
 
 - [Git](https://git-scm.com/downloads), required to add the plugin marketplace
 - [GitHub Copilot CLI](https://github.com/github/copilot-cli)
-- [Python 3.12 or later](https://www.python.org/downloads/), required to run the plugin's helper scripts
 - Access to the Azure subscriptions and resources involved in your request
 - An authenticated Azure identity with the permissions required for the requested read or change
+- For graph features: [Node.js](https://nodejs.org/) and Python 3.12, 3.13 or 3.14 on the host. The graph runtime never installs Python; set `FOUNDRY_IQ_PYTHON` to an absolute interpreter path if none is found on `PATH`.
 
 If you use Azure CLI for authentication, install the [Azure CLI](https://learn.microsoft.com/cli/azure/install-azure-cli) and sign in:
 
 ```bash
 az login
 ```
-
-The plugin supports Copilot CLI on Windows and Linux. Depending on the task, it uses supported Azure SDK, REST, infrastructure-as-code, Azure MCP Server, or native knowledge-base MCP interfaces.
 
 ## Installation
 
@@ -62,29 +54,26 @@ To update the plugin:
 
 ## Example prompts
 
-- "Create a knowledge base from `./docs`."
-- "Create a knowledge base from this Blob container."
-- "Query this knowledge base with citations."
-- "Connect this knowledge base to my existing agent."
-- "Why is retrieval from this knowledge base failing?"
+- "Why can't my search service read from this Blob container?"
+- "My indexer stopped picking up new documents. What's wrong?"
+- "Which API version should I use for a knowledge base request?"
+- "Build an entity graph over these documents and find how these teams are connected."
+- "Show me what Foundry IQ graph can do."
 
 ## Before changes are made
 
-The skill starts with read-only checks and can reuse Azure resources you identify. It asks whether to use an existing service, find compatible services, or create a new one before performing broader discovery.
+The skill asks for approval before billable, permission, network, production, destructive, credential or data-movement changes. The graph demo asks its questions once, then shows each approval before it changes Azure or spends money.
 
-It asks for your approval before it:
+## Graph runtime and optional MCP Apps host
 
-- Creates an Azure AI Search (Foundry IQ) service, knowledge source, or knowledge base
-- Connects a knowledge base to an agent
-- Makes another planned change to Azure resources
+The `foundry-iq-graph` MCP server starts `node ${CLAUDE_PLUGIN_ROOT}/graph/runtime/launch-python.mjs`, which prepares an isolated, hash-locked Python runtime on first use. `graph/runtime/manifest.json` records wheel, source and dependency provenance. See [route checks](skills/foundry-iq/workflows/graph/graph-guide/references/install-and-checks.md) for details.
 
-Approval applies to the plan shown to you. If the plan changes, the skill asks again. Cleanup is handled as a separate planning workflow. The skill can also perform supported deletion of workflow-owned resources after separate approval.
+An optional localhost MCP Apps viewer ships in `graph/apps-host`; see its [README](graph/apps-host/README.md) for prerequisites.
 
 ## Learn more
 
-- [Azure AI Search (Foundry IQ) overview](https://learn.microsoft.com/azure/search/search-what-is-azure-search)
+- [Azure AI Search overview](https://learn.microsoft.com/azure/search/search-what-is-azure-search)
 - [Foundry IQ and agentic retrieval](https://learn.microsoft.com/azure/search/agentic-retrieval-overview)
-- [Azure AI Search (Foundry IQ) API and SDK versions](https://learn.microsoft.com/azure/search/search-api-versions)
-- [Azure AI Search (Foundry IQ) REST API](https://learn.microsoft.com/en-us/rest/api/searchservice/?source=recommendations)
-- [Azure MCP Server tools for Azure AI Search (Foundry IQ)](https://learn.microsoft.com/azure/developer/azure-mcp-server/tools/azure-ai-search)
+- [Azure AI Search API and SDK versions](https://learn.microsoft.com/azure/search/search-api-versions)
+- [Azure MCP Server tools for Azure AI Search](https://learn.microsoft.com/azure/developer/azure-mcp-server/tools/azure-ai-search)
 - [Foundry IQ skill details](skills/foundry-iq/SKILL.md)
