@@ -2,7 +2,7 @@ name: PR Plugin Version Check
 
 on:
   pull_request:
-    branches: [main]
+    branches: [main, test/foundry-iq-release-20261113-base]
     paths:
       - "plugins/*/plugin.json"
       - "plugins/*/.plugin/plugin.json"

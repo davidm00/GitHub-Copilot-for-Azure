@@ -1,0 +1,130 @@
+name: foundry-iq-search-invocation-eval
+description: |
+  Checks routing for non-graph Azure AI Search and Foundry IQ requests.
+  Positive cases assume skill selection before resource discovery or questions.
+  Invocation does not establish that the requested task was completed.
+
+tags:
+  type: integration
+  skill: foundry-iq
+
+defaults:
+  runs: 5
+  timeout: "10m"
+  executor: copilot-sdk-agent-runner
+  model: claude-sonnet-5
+
+scoring:
+  threshold: 0.8
+
+stimuli:
+  - name: "Design a hybrid Search query"
+    prompt: "How should I combine keyword and vector search for my Azure AI Search index when querying a collection of documents?"
+    tags:
+      type: integration
+      tier: smoke
+      cost: llm
+      area: routing
+      requiredSkills: [foundry-iq]
+      earlyTerminate: '[{"type":"skill-call","skill":"foundry-iq"},{"type":"tool-call-count","count":3}]'
+    graders:
+      - type: skill-invocation
+        config:
+          required: [foundry-iq]
+      - type: output-not-matches
+        config:
+          pattern: "(?i)fatal error|unhandled exception|stack trace"
+
+  - name: "Diagnose stale Search content"
+    prompt: "My Azure AI Search indexer stopped updating documents. What read-only evidence should I check to diagnose the freshness problem?"
+    tags:
+      type: integration
+      tier: smoke
+      cost: llm
+      area: routing
+      requiredSkills: [foundry-iq]
+      earlyTerminate: '[{"type":"skill-call","skill":"foundry-iq"},{"type":"tool-call-count","count":3}]'
+    graders:
+      - type: skill-invocation
+        config:
+          required: [foundry-iq]
+      - type: output-not-matches
+        config:
+          pattern: "(?i)fatal error|unhandled exception|stack trace"
+
+  - name: "Diagnose private source access"
+    prompt: "My Foundry IQ knowledge base cannot access its private Azure Blob source. How should I investigate its managed identity, permissions, DNS, and network access?"
+    tags:
+      type: integration
+      tier: full
+      cost: llm
+      area: routing
+      requiredSkills: [foundry-iq]
+      earlyTerminate: '[{"type":"skill-call","skill":"foundry-iq"},{"type":"tool-call-count","count":3}]'
+    graders:
+      - type: skill-invocation
+        config:
+          required: [foundry-iq]
+      - type: output-not-matches
+        config:
+          pattern: "(?i)fatal error|unhandled exception|stack trace"
+
+  - name: "Connect an existing knowledge base"
+    prompt: "I already have a Foundry IQ knowledge base. How do I connect it to an existing Foundry agent for grounded answers without replacing the agent?"
+    tags:
+      type: integration
+      tier: full
+      cost: llm
+      area: routing
+      requiredSkills: [foundry-iq]
+      earlyTerminate: '[{"type":"skill-call","skill":"foundry-iq"},{"type":"tool-call-count","count":3}]'
+    graders:
+      - type: skill-invocation
+        config:
+          required: [foundry-iq]
+      - type: output-not-matches
+        config:
+          pattern: "(?i)fatal error|unhandled exception|stack trace"
+
+  - name: "Choose a Search REST API version"
+    prompt: "How can I securely query my existing Azure AI Search index through REST, and how should I select a supported API version?"
+    tags:
+      type: integration
+      tier: full
+      cost: llm
+      area: routing
+      requiredSkills: [foundry-iq]
+      earlyTerminate: '[{"type":"skill-call","skill":"foundry-iq"},{"type":"tool-call-count","count":3}]'
+    graders:
+      - type: skill-invocation
+        config:
+          required: [foundry-iq]
+      - type: output-not-matches
+        config:
+          pattern: "(?i)fatal error|unhandled exception|stack trace"
+
+  - name: "Negative: AKS node pool"
+    prompt: "How can I change the VM size of an Azure Kubernetes Service node pool?"
+    tags:
+      type: integration
+      tier: full
+      cost: llm
+      area: negative-routing
+      requiredSkills: [foundry-iq]
+    graders:
+      - type: skill-invocation
+        config:
+          disallowed: [foundry-iq]
+
+  - name: "Negative: Microsoft Graph directory API"
+    prompt: "Use the Microsoft Graph API to list users in my Microsoft Entra directory."
+    tags:
+      type: integration
+      tier: full
+      cost: llm
+      area: negative-routing
+      requiredSkills: [foundry-iq]
+    graders:
+      - type: skill-invocation
+        config:
+          disallowed: [foundry-iq]

@@ -2,7 +2,7 @@ name: PR Checks
 
 on:
   pull_request:
-    branches: [main]
+    branches: [main, test/foundry-iq-release-20261113-base]
 
 jobs:
   pr-title-prefix:

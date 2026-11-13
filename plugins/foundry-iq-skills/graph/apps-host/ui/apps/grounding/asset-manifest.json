@@ -1,0 +1,28 @@
+{
+  "schemaVersion": 1,
+  "domain": "grounding",
+  "server": "grounding-skills",
+  "sourceCommit": "718bc9614e45d2e9019d102f0434b1d2a41016a7",
+  "sourceTree": "f4c0c63795ad58e63401c2132165fd786583a3b1",
+  "sourceDirty": false,
+  "lockfileSha256": "2b8a74632a91698815a20cef37af9cbd85b084bf0b1048d78e2fdf5b92371c8e",
+  "entries": {
+    "grounding_present": {
+      "html": "explorer.html",
+      "uri": "ui://grounding-skills/explorer.html",
+      "embeddedHtmlSha256": "7fd4aa80263c25610e404a2c9e05a00e12f469dda5fb361218da70a6c96d608b"
+    }
+  },
+  "files": {
+    "THIRD_PARTY_NOTICES.txt": "48dbc99fc23fb1d5737e14f09a7a98cd79d00fe6f5c6e116e7dd298d52062a45",
+    "assets/explorer-DA_H5-5w.js": "a9a7b1bfc723f176c6499b903612212667404ddac3fec78fafe1d1c7677b6d36",
+    "assets/explorer-DWzbXF_P.css": "4519568e5719c637efd47d6068ed964ea8a6238e6687ac506fb7bc4ca40e0e31",
+    "explorer.html": "0e96ab5656cb6e5b04531c363d6c401ccd0dd5b8fdab3afd10b53eee88e29da5"
+  },
+  "reports": {
+    "grounding_present": {
+      "gzipJsCssBytes": 534243,
+      "budgetBytes": 1048576
+    }
+  }
+}
