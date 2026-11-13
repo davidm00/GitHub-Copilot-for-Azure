@@ -10,7 +10,7 @@
     "apps": "2.0.4"
   },
   "connectorSha256": "df25394b2262d2ee7644a0a50c0fd5bd7b4a1c634ba515752fd94a7d068a395f",
-  "supervisorSha256": "654bd51fdc138f21f0a917695434c3a9e195cf98e33e98ea1b949f9961aeccd9",
+  "supervisorSha256": "b6872b0d6fe6ef2002b0d2ae2e2587a23454ecde5feeeb43c0624dedbfd6e1c0",
   "outputs": {
     "apps/entity/asset-manifest.json": "e82accfc82716cfd3476e80e5f36ccde06b6e1000c9a8d44b3e65a075d78f359",
     "apps/entity/assets/evidence-BdXKkRDq.js": "62f1948e27fce73886e8fe4a4f5cc5d93e88b03cc1dd7be0819e2b96813ab265",
